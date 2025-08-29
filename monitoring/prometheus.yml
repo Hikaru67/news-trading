@@ -1,0 +1,37 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  # Signal Collector metrics
+  - job_name: 'signal-collector'
+    static_configs:
+      - targets: ['signal-collector:8000']
+    scrape_interval: 5s
+
+  # Execution Engine metrics
+  - job_name: 'execution-engine'
+    static_configs:
+      - targets: ['execution-engine:8001']
+    scrape_interval: 5s
+
+  # X Crawler metrics
+  - job_name: 'x-crawler'
+    static_configs:
+      - targets: ['x-crawler:8002']
+    scrape_interval: 5s
+
+  # Telegram Bot metrics
+  - job_name: 'telegram-bot'
+    static_configs:
+      - targets: ['telegram-bot:8003']
+    scrape_interval: 5s
+
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
