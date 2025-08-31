@@ -11,7 +11,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 
 import redis
@@ -76,7 +76,7 @@ class XCrawler:
                 'check_interval': 180
             },
             'vitalikbuterin': {
-                'username': 'VitalikButerin',
+                'username': 'vitalikbuterin',
                 'trust_score': 0.9,
                 'check_interval': 300
             }
@@ -232,7 +232,7 @@ class XCrawler:
                             tweets.append({
                                 'id': f"rss_{username}_{hash(entry.get('title', ''))}",
                                 'text': entry.get('title', ''),
-                                'created_at': entry.get('published', datetime.now(timezone.utc).isoformat())
+                                'created_at': entry.get('published', datetime.now(timezone(timedelta(hours=7))).isoformat())
                             })
                         
                         logger.info(f"Got {len(tweets)} tweets via RSS from {username}")
@@ -302,7 +302,7 @@ class XCrawler:
             result.append({
                 'id': f"sim_{username}_{i}_{timestamp}",
                 'text': modified_text,
-                'created_at': datetime.now(timezone.utc).isoformat()
+                'created_at': datetime.now(timezone(timedelta(hours=7))).isoformat()
             })
         
         logger.info(f"Generated {len(result)} simulated tweets for {username}")
@@ -378,7 +378,7 @@ class XCrawler:
             # Create signal
             signal = {
                 'event_id': str(uuid.uuid4()),
-                'ts_iso': datetime.now(timezone.utc).isoformat(),
+                'ts_iso': datetime.now(timezone(timedelta(hours=7))).isoformat(),
                 'source': f'x_{source}',
                 'headline': tweet['text'][:100] + "..." if len(tweet['text']) > 100 else tweet['text'],
                 'url': f"https://twitter.com/{username}/status/{tweet['id']}",
@@ -492,11 +492,11 @@ class XCrawler:
                     tweets.extend(scraped_tweets)
                     logger.info(f"Got {len(scraped_tweets)} tweets via scraping from {account_name}")
                 
-                        # Method 4: Use simulated tweets (for testing)
-        if not tweets:
-            simulated_tweets = self.get_simulated_tweets(username)
-            tweets.extend(simulated_tweets)
-            logger.info(f"Generated {len(simulated_tweets)} simulated tweets for {account_name}")
+                # Method 4: Use simulated tweets (for testing)
+                if not tweets:
+                    simulated_tweets = self.get_simulated_tweets(username)
+                    tweets.extend(simulated_tweets)
+                    logger.info(f"Generated {len(simulated_tweets)} simulated tweets for {account_name}")
                 
                 # Process tweets
                 for tweet in tweets:

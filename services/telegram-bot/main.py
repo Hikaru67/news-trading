@@ -8,7 +8,8 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
+import redis
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 
 import requests
@@ -38,6 +39,10 @@ class TelegramBot:
         else:
             self.enabled = True
         
+        # Redis for deduplication
+        self.redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+        self.redis_client = redis.from_url(self.redis_url)
+        
         # Kafka consumer
         self.kafka_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092').split(',')
         self.consumer = KafkaConsumer(
@@ -49,7 +54,7 @@ class TelegramBot:
             enable_auto_commit=True
         )
         
-        # Message templates
+        # Message templates - ONLY HIGH IMPACT EVENTS
         self.message_templates = {
             'LISTING': {
                 'emoji': '🚀',
@@ -66,43 +71,55 @@ class TelegramBot:
                 'title': 'FED ANNOUNCEMENT',
                 'color': '🟡'
             },
-            'POLITICAL_POST': {
-                'emoji': '🏛️',
-                'title': 'POLITICAL NEWS',
-                'color': '🔵'
+            'REGULATION': {
+                'emoji': '⚖️',
+                'title': 'CRITICAL REGULATION',
+                'color': '🔴'
             },
             'HACK': {
                 'emoji': '💥',
                 'title': 'SECURITY ALERT',
                 'color': '🔴'
-            },
-            'OTHER': {
-                'emoji': '📰',
-                'title': 'CRYPTO NEWS',
-                'color': '⚪'
             }
         }
         
         # Rate limiting
         self.last_message_time = 0
         self.min_interval = 2  # seconds between messages
+        
+        # Deduplication
+        self.sent_signals_ttl = 86400  # 24 hours in seconds
+
+    def is_signal_sent(self, signal_id: str) -> bool:
+        """Check if signal was already sent to Telegram"""
+        return self.redis_client.exists(f"telegram_sent:{signal_id}")
+
+    def mark_signal_sent(self, signal_id: str):
+        """Mark signal as sent to Telegram"""
+        self.redis_client.setex(f"telegram_sent:{signal_id}", self.sent_signals_ttl, "1")
 
     def format_message(self, signal: Dict) -> str:
         """Format signal into Telegram message"""
         try:
             event_type = signal.get('event_type', 'OTHER')
-            template = self.message_templates.get(event_type, self.message_templates['OTHER'])
+            template = self.message_templates.get(event_type)
             
-            # Format timestamp
+            # If no template found, skip this signal (it's not a high impact event)
+            if not template:
+                logger.info(f"No template for event type: {event_type} - skipping")
+                return None
+            
+            # Format timestamp (already in +7 timezone from signal-collector)
             ts = signal.get('ts_iso', '')
             if ts:
                 try:
-                    dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-                    formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+                    dt = datetime.fromisoformat(ts)
+                    formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S GMT+7')
                 except:
                     formatted_time = ts
             else:
-                formatted_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+                vietnam_tz = timezone(timedelta(hours=7))
+                formatted_time = datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S GMT+7')
             
             # Format entities
             entities = signal.get('entities', [])
@@ -179,25 +196,26 @@ class TelegramBot:
             return False
 
     def should_send_message(self, signal: Dict) -> bool:
-        """Determine if message should be sent based on filters"""
+        """Determine if message should be sent based on filters - ONLY HIGH IMPACT"""
         try:
-            # Always send LISTING and DELIST events
+            # Check if signal was already sent
+            signal_id = signal.get('event_id', '')
+            if self.is_signal_sent(signal_id):
+                logger.info(f"Signal already sent to Telegram: {signal_id}")
+                return False
+            
+            # Check severity first (only send VERY HIGH severity signals)
+            severity = signal.get('severity', 0)
+            if severity < 0.8:  # Skip low impact signals
+                return False
+            
+            # Only send CRITICAL events that can move markets immediately
             event_type = signal.get('event_type', '')
-            if event_type in ['LISTING', 'DELIST']:
+            if event_type in ['LISTING', 'DELIST', 'HACK', 'REGULATION']:
                 return True
             
-            # Send FED_SPEECH and HACK events with high confidence
-            if event_type in ['FED_SPEECH', 'HACK']:
-                confidence = signal.get('confidence', 0)
-                return confidence >= 0.7
-            
-            # Send POLITICAL_POST with medium confidence
-            if event_type == 'POLITICAL_POST':
-                confidence = signal.get('confidence', 0)
-                return confidence >= 0.6
-            
-            # Send OTHER events with high confidence
-            if event_type == 'OTHER':
+            # Send FED_SPEECH events with high confidence
+            if event_type == 'FED_SPEECH':
                 confidence = signal.get('confidence', 0)
                 return confidence >= 0.8
             
@@ -221,8 +239,16 @@ class TelegramBot:
                         # Format message
                         formatted_message = self.format_message(signal)
                         
+                        # Skip if no template found (not a high impact event)
+                        if formatted_message is None:
+                            continue
+                        
                         # Send to Telegram
                         if self.send_telegram_message(formatted_message):
+                            # Mark as sent
+                            signal_id = signal.get('event_id', '')
+                            self.mark_signal_sent(signal_id)
+                            
                             # Update metrics
                             MESSAGES_SENT.labels(
                                 source=signal.get('source', 'unknown'),

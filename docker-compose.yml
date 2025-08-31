@@ -84,11 +84,11 @@ services:
     volumes:
       - ./logs:/app/logs
 
-  # Execution Engine Service
+  # Execution Engine Service (Go)
   execution-engine:
     build:
       context: .
-      dockerfile: services/execution-engine/Dockerfile
+      dockerfile: services/execution-engine-go/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,39 +98,132 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://trading_user:trading_pass@postgres:5432/news_trading
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - REDIS_URL=redis://redis:6379
-      - BYBIT_API_KEY=${BYBIT_API_KEY}
-      - BYBIT_SECRET_KEY=${BYBIT_SECRET_KEY}
-    volumes:
-      - ./logs:/app/logs
 
-  # X (Twitter) Crawler Service
-  x-crawler:
+  # Bybit API Client Service (Go)
+  bybit-api-client:
     build:
       context: .
-      dockerfile: services/x-crawler/Dockerfile
-    depends_on:
-      postgres:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      dockerfile: services/bybit-api-client/Dockerfile
     environment:
-      - DATABASE_URL=postgresql://trading_user:trading_pass@postgres:5432/news_trading
+      - BYBIT_API_KEY=${BYBIT_API_KEY}
+      - BYBIT_SECRET_KEY=${BYBIT_SECRET_KEY}
+      - BYBIT_TESTNET=${BYBIT_TESTNET:-true}
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - kafka
+      - redis
+    profiles:
+      - tools
+    volumes:
+      - ./logs:/root/logs
+
+  # Phase 2: Real-time Infrastructure
+  websocket-rss-client:
+    build:
+      context: .
+      dockerfile: services/websocket-rss-client/Dockerfile
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - kafka
+      - redis
+    restart: unless-stopped
+
+  real-time-x-client:
+    build:
+      context: .
+      dockerfile: services/real-time-x-client/Dockerfile
+    environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - REDIS_URL=redis://redis:6379
       - X_BEARER_TOKEN=${X_BEARER_TOKEN}
       - X_API_KEY=${X_API_KEY}
       - X_API_SECRET=${X_API_SECRET}
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_DB=news_trading
-      - POSTGRES_USER=trading_user
-      - POSTGRES_PASSWORD=trading_pass
-    volumes:
-      - ./logs:/app/logs
+      - X_ACCESS_TOKEN=${X_ACCESS_TOKEN}
+      - X_ACCESS_TOKEN_SECRET=${X_ACCESS_TOKEN_SECRET}
+    depends_on:
+      - kafka
+      - redis
+    restart: unless-stopped
+
+  fed-calendar-client:
+    build:
+      context: .
+      dockerfile: services/fed-calendar-client/Dockerfile
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - kafka
+      - redis
+    restart: unless-stopped
+
+  # Phase 2: AI/ML Integration
+  ai-ml-service:
+    build:
+      context: .
+      dockerfile: services/ai-ml-service/Dockerfile
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - kafka
+      - redis
+    restart: unless-stopped
+
+  # Phase 2: Advanced Trading Features
+  advanced-trading-service:
+    build:
+      context: .
+      dockerfile: services/advanced-trading-service/Dockerfile
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - kafka
+      - redis
+    restart: unless-stopped
+
+  backtesting-service:
+    build:
+      context: .
+      dockerfile: services/backtesting-service/Dockerfile
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - kafka
+      - redis
+    restart: unless-stopped
+
+  # X (Twitter) Crawler Service - DISABLED (using mock data)
+  # x-crawler:
+  #   build:
+  #     context: .
+  #     dockerfile: services/x-crawler/Dockerfile
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     kafka:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   environment:
+  #     - DATABASE_URL=postgresql://trading_user:trading_pass@postgres:5432/news_trading
+  #     - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+  #     - REDIS_URL=redis://redis:6379
+  #     - X_BEARER_TOKEN=${X_BEARER_TOKEN}
+  #     - X_API_KEY=${X_API_KEY}
+  #     - X_API_SECRET=${X_API_SECRET}
+  #     - POSTGRES_HOST=postgres
+  #     - POSTGRES_PORT=5432
+  #     - POSTGRES_DB=news_trading
+  #     - POSTGRES_USER=trading_user
+  #     - POSTGRES_PASSWORD=trading_pass
+  #   volumes:
+  #     - ./logs:/app/logs
 
   # Telegram Bot Service
   telegram-bot:
@@ -140,8 +233,11 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHANNEL_ID=${TELEGRAM_CHANNEL_ID}
     volumes:

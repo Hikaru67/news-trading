@@ -11,7 +11,8 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+import requests
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 
 import feedparser
@@ -54,53 +55,86 @@ class SignalCollector:
             retries=3
         )
         
-        # RSS sources configuration
+        # RSS sources configuration (only working sources)
         self.sources = {
-            'binance': {
-                'url': 'https://www.binance.com/en/support/announcement/rss',
-                'trust_score': 0.98,
-                'check_interval': 30  # seconds
+            'cointelegraph': {
+                'url': 'https://cointelegraph.com/rss',
+                'trust_score': 0.85,
+                'check_interval': 120  # seconds
             },
-            'coinbase': {
-                'url': 'https://blog.coinbase.com/feed',
-                'trust_score': 0.95,
-                'check_interval': 60  # seconds
-            },
-            'cryptonews': {
-                'url': 'https://cryptonews.com/news/feed',
+            'decrypt': {
+                'url': 'https://decrypt.co/feed',
                 'trust_score': 0.8,
+                'check_interval': 120  # seconds
+            },
+            'theblock': {
+                'url': 'https://www.theblock.co/rss.xml',
+                'trust_score': 0.85,
                 'check_interval': 120  # seconds
             }
         }
         
-        # Event type patterns
+        # Event type patterns - ONLY HIGH IMPACT EVENTS
         self.event_patterns = {
             'LISTING': [
-                r'\b(Will List|Lists|Listing|Launches)\b',
-                r'\b(New Trading Pair|New Asset)\b'
+                r'\b(Will List|Lists|Listing|New Trading Pair|New Asset|New Token)\b',
+                r'\b(Coming Soon|Available for Trading|Now Live|Trading Starts)\b',
+                r'\b(Spot Trading|Futures Trading|Margin Trading)\b',
+                r'\b(Adds|Added|New Coin|New Cryptocurrency)\b'
             ],
             'DELIST': [
-                r'\b(Delist|Delisting|Removes|Suspends)\b',
-                r'\b(Trading Halt|Trading Suspension)\b'
+                r'\b(Delist|Delisting|Removes|Suspends|Discontinues|Terminates)\b',
+                r'\b(Trading Halt|Trading Suspension|Trading Stop)\b',
+                r'\b(No Longer Available|Removed from Trading)\b'
+            ],
+            'FED_SPEECH': [
+                r'\b(Fed|Federal Reserve|Jerome Powell|Powell Speech)\b',
+                r'\b(Rate Hike|Rate Cut|Interest Rate|Monetary Policy)\b',
+                r'\b(Hawkish|Dovish|Inflation|CPI|Employment)\b'
+            ],
+            'REGULATION': [
+                r'\b(Ban|Banned|Illegal|Criminal|Arrest|Indictment)\b',
+                r'\b(Shutdown|Shut Down|Cease|Ceased|Stop|Stopped)\b',
+                r'\b(Enforcement|Investigation|Settlement|Fine|Penalty)\b'
+            ],
+            'HACK': [
+                r'\b(Hack|Hacked|Exploit|Exploited|Breach|Breached)\b',
+                r'\b(Drain|Drained|Stolen|Theft|Compromised)\b',
+                r'\b(Bridge Hack|Protocol Hack|Smart Contract Bug)\b'
             ]
         }
 
     def extract_event_type(self, text: str) -> tuple[str, str, float]:
-        """Extract event type, direction, and severity from text"""
+        """Extract event type, direction, and severity from text - ONLY HIGH IMPACT"""
         text_lower = text.lower()
         
-        # Check for listing events
+        # Check for listing events (HIGH IMPACT)
         for pattern in self.event_patterns['LISTING']:
             if any(keyword in text_lower for keyword in pattern.lower().split('|')):
                 return 'LISTING', 'BULL', 0.9
         
-        # Check for delisting events
+        # Check for delisting events (HIGH IMPACT)
         for pattern in self.event_patterns['DELIST']:
             if any(keyword in text_lower for keyword in pattern.lower().split('|')):
                 return 'DELIST', 'BEAR', 0.9
         
-        # Default
-        return 'OTHER', 'UNKNOWN', 0.3
+        # Check for Fed speech events (HIGH IMPACT)
+        for pattern in self.event_patterns['FED_SPEECH']:
+            if any(keyword in text_lower for keyword in pattern.lower().split('|')):
+                return 'FED_SPEECH', 'UNKNOWN', 0.8
+        
+        # Check for regulation events (HIGH IMPACT - only serious ones)
+        for pattern in self.event_patterns['REGULATION']:
+            if any(keyword in text_lower for keyword in pattern.lower().split('|')):
+                return 'REGULATION', 'BEAR', 0.9
+        
+        # Check for hack events (HIGH IMPACT)
+        for pattern in self.event_patterns['HACK']:
+            if any(keyword in text_lower for keyword in pattern.lower().split('|')):
+                return 'HACK', 'BEAR', 0.9
+        
+        # Default - LOW IMPACT, IGNORE
+        return 'OTHER', 'UNKNOWN', 0.1
 
     def extract_entities(self, text: str) -> List[str]:
         """Extract entities (tickers) from text"""
@@ -135,10 +169,35 @@ class SignalCollector:
             event_type, direction, severity = self.extract_event_type(text)
             entities = self.extract_entities(text)
             
+            # Parse published time from RSS entry and convert to +7 timezone
+            news_published_time = None
+            try:
+                published = entry.get('published', '')
+                if published:
+                    # Try to parse RSS date format
+                    import email.utils
+                    parsed_date = email.utils.parsedate_to_datetime(published)
+                    # Convert to Vietnam timezone (+7)
+                    vietnam_tz = timezone(timedelta(hours=7))
+                    vietnam_time = parsed_date.astimezone(vietnam_tz)
+                    news_published_time = vietnam_time.isoformat()
+                    
+                    # Check if news is from today (Vietnam time)
+                    now_vietnam = datetime.now(vietnam_tz)
+                    if vietnam_time.date() < now_vietnam.date():
+                        logger.info(f"Skipping old news from {vietnam_time.date()}")
+                        return None
+                else:
+                    vietnam_tz = timezone(timedelta(hours=7))
+                    news_published_time = datetime.now(vietnam_tz).isoformat()
+            except:
+                vietnam_tz = timezone(timedelta(hours=7))
+                news_published_time = datetime.now(vietnam_tz).isoformat()
+            
             # Create signal
             signal = {
-                'event_id': str(uuid.uuid4()),
-                'ts_iso': datetime.now(timezone.utc).isoformat(),
+                'event_id': content_hash,  # Use content hash for consistent deduplication
+                'ts_iso': news_published_time,  # Use news published time
                 'source': source,
                 'headline': entry.get('title', ''),
                 'url': entry.get('link', ''),
@@ -151,7 +210,8 @@ class SignalCollector:
                 'raw_text': text,
                 'extras': {
                     'content_hash': content_hash,
-                    'source_url': entry.get('link', '')
+                    'source_url': entry.get('link', ''),
+                    'published': entry.get('published', '')  # Store original published time
                 }
             }
             
@@ -236,19 +296,24 @@ class SignalCollector:
                         signal = self.normalize_signal(entry, source_name)
                         
                         if signal:
-                            # Save to database
-                            self.save_signal_to_db(signal)
-                            
-                            # Publish to Kafka
-                            self.publish_to_kafka(signal)
-                            
-                            # Update metrics
-                            SIGNALS_PROCESSED.labels(
-                                source=source_name, 
-                                event_type=signal['event_type']
-                            ).inc()
-                            
-                            logger.info(f"Processed signal: {signal['event_type']} from {source_name}")
+                            # Filter by severity (only process VERY HIGH severity signals)
+                            severity = signal.get('severity', 0)
+                            if severity >= 0.8:  # Only process signals with severity >= 0.8 (HIGH IMPACT)
+                                # Save to database
+                                self.save_signal_to_db(signal)
+                                
+                                # Publish to Kafka
+                                self.publish_to_kafka(signal)
+                                
+                                # Update metrics
+                                SIGNALS_PROCESSED.labels(
+                                    source=source_name, 
+                                    event_type=signal['event_type']
+                                ).inc()
+                                
+                                logger.info(f"Processed HIGH IMPACT signal: {signal['event_type']} from {source_name} (severity: {severity:.2f})")
+                            else:
+                                logger.info(f"Skipped low impact signal: {signal['event_type']} from {source_name} (severity: {severity:.2f})")
                 
                 # Wait before next check
                 await asyncio.sleep(source_config['check_interval'])
