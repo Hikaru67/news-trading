@@ -277,11 +277,13 @@ class WebSocketRSSClient:
     
     def is_duplicate(self, content_hash: str) -> bool:
         """Check if content hash already exists in Redis"""
-        return self.redis_client.exists(f"rss_hash:{content_hash}")
+        # Use same key as signal-collector for unified deduplication
+        return self.redis_client.exists(f"signal_hash:{content_hash}")
     
     def mark_as_processed(self, content_hash: str, ttl: int = 3600):
         """Mark content hash as processed in Redis"""
-        self.redis_client.setex(f"rss_hash:{content_hash}", ttl, "1")
+        # Use same key as signal-collector for unified deduplication
+        self.redis_client.setex(f"signal_hash:{content_hash}", ttl, "1")
     
     async def publish_to_kafka(self, signal: Dict):
         """Publish signal to Kafka topic"""
