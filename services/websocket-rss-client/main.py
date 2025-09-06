@@ -27,68 +27,57 @@ class WebSocketRSSClient:
         self.kafka_producer = KafkaProducer(
             bootstrap_servers=os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:29092'),
             value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-            key_serializer=lambda k: k.encode('utf-8') if k else None
+            key_serializer=lambda k: (
+                k if isinstance(k, bytes) else (k.encode('utf-8') if k is not None else None)
+            )
         )
         
         self.redis_client = redis.Redis.from_url(
             os.getenv('REDIS_URL', 'redis://redis:6379')
         )
         
-        # RSS sources with WebSocket support
+        # RSS sources - Only BWEnews
         self.rss_sources = {
-            'cointelegraph': {
-                'url': 'https://cointelegraph.com/rss',
-                'trust_score': 0.85,
-                'websocket_url': 'wss://cointelegraph.com/ws/rss',
-                'polling_fallback': True
-            },
-            'theblock': {
-                'url': 'https://www.theblock.co/rss.xml',
-                'trust_score': 0.80,
-                'websocket_url': 'wss://www.theblock.co/ws/rss',
-                'polling_fallback': True
-            },
-            'decrypt': {
-                'url': 'https://decrypt.co/feed',
-                'trust_score': 0.75,
-                'websocket_url': 'wss://decrypt.co/ws/feed',
-                'polling_fallback': True
+            'bwenews': {
+                'url': 'https://rss-public.bwe-ws.com/',  # RSS feed
+                'trust_score': 0.90,
+                'websocket_url': None,  # Disable WebSocket, use RSS only
+                'polling_fallback': True,
+                'category': 'crypto_news',
+                'language': 'en',
+                'api_type': 'bwenews'  # Special handling for BWEnews format
             }
         }
         
-        # Event patterns for classification
+        # Event patterns for classification - ONLY specific token events
         self.event_patterns = {
             'LISTING': [
-                'will list', 'lists', 'listing', 'new listing', 'adds support',
-                'trading pairs', 'spot trading', 'futures trading'
+                # Specific listing patterns only
+                'will list', 'lists', 'listing', 'new listing', 'adds support for',
+                'trading pairs', 'spot trading', 'futures trading', 'trading support for',
+                'new trading', 'trading available', 'now trading', 'trading begins',
+                'trading starts', 'trading launch', 'trading open', 'trading live',
+                'trading active', 'trading enabled', 'trading launched',
+                # Korean patterns
+                '상장', '거래지원', '신규상장', '거래쌍', '스팟거래', '선물거래',
+                '추가지원', '거래시작', '상장예정', '거래개시', '거래오픈', '거래활성화'
             ],
             'DELIST': [
-                'delist', 'suspends', 'removes', 'discontinues', 'trading halt'
+                # Specific delisting patterns only
+                'delist', 'suspends', 'removes', 'discontinues', 'trading halt',
+                'trading suspension', 'delisting', 'removes support for',
+                # Korean patterns
+                '상장폐지', '거래중단', '거래정지', '지원중단', '제거', '중단'
             ],
             'HACK': [
+                # Specific hack patterns only
                 'hack', 'exploit', 'drained', 'breach', 'security incident',
-                'vulnerability', 'attack', 'compromised'
-            ],
-            'REGULATION': [
-                'regulation', 'regulatory', 'sec', 'cfdc', 'compliance',
-                'legal action', 'lawsuit', 'investigation'
-            ],
-            'FED_SPEECH': [
-                'fed', 'federal reserve', 'jerome powell', 'rate hike',
-                'monetary policy', 'inflation', 'interest rates'
-            ],
-            'POLITICAL_POST': [
-                'trump', 'biden', 'election', 'political', 'government',
-                'policy', 'legislation', 'congress'
-            ],
-            'TECHNICAL_UPGRADE': [
-                'upgrade', 'update', 'mainnet', 'hard fork', 'protocol',
-                'network', 'blockchain', 'smart contract'
-            ],
-            'PARTNERSHIP': [
-                'partnership', 'collaboration', 'integration', 'alliance',
-                'joint venture', 'merger', 'acquisition'
+                'vulnerability', 'attack', 'compromised', 'hacked', 'exploited',
+                # Korean patterns
+                '해킹', '침해', '보안사고', '취약점', '공격', '침입', '도난'
             ]
+            # Removed all non-token specific events (REGULATION, FED_SPEECH, POLITICAL_POST, 
+            # TECHNICAL_UPGRADE, PARTNERSHIP) to focus only on token-specific events
         }
         
         # WebSocket connections
@@ -119,16 +108,29 @@ class WebSocketRSSClient:
     async def listen_websocket(self, source_name: str, websocket):
         """Listen for real-time WebSocket updates"""
         try:
+            # Send ping to maintain connection (for BWEnews)
+            if source_name == 'bwenews':
+                await websocket.send('ping')
+                
             async for message in websocket:
                 try:
+                    # Handle BWEnews ping/pong
+                    if source_name == 'bwenews' and message == 'pong':
+                        logger.debug(f"Received pong from {source_name}")
+                        continue
+                    
                     # Parse WebSocket message
                     data = json.loads(message)
                     
-                    # Process real-time RSS entry
-                    if 'rss_entry' in data:
-                        await self.process_rss_entry(source_name, data['rss_entry'])
-                    elif 'news_update' in data:
-                        await self.process_news_update(source_name, data['news_update'])
+                    # Handle BWEnews API format
+                    if source_name == 'bwenews':
+                        await self.process_bwenews_message(source_name, data)
+                    else:
+                        # Process standard RSS entry
+                        if 'rss_entry' in data:
+                            await self.process_rss_entry(source_name, data['rss_entry'])
+                        elif 'news_update' in data:
+                            await self.process_news_update(source_name, data['news_update'])
                         
                 except json.JSONDecodeError:
                     logger.warning(f"Invalid JSON from {source_name} WebSocket")
@@ -159,12 +161,21 @@ class WebSocketRSSClient:
             # Extract event information
             text = f"{entry.get('title', '')} {entry.get('summary', '')}"
             event_type, direction, severity = self.extract_event_type(text)
-            entities = self.extract_entities(text)
+            entities = self.extract_entities(text, entry.get('coins_included', []))
+            
+            # Only process token-specific events (LISTING, DELIST, HACK) for non-bwenews sources.
+            # For 'bwenews', allow all events to pass through.
+            if source_name != 'bwenews' and event_type not in ['LISTING', 'DELIST', 'HACK']:
+                logger.info(f"Skipping non-token-specific event: {event_type} from {source_name}")
+                return None
             
             # Parse published time and convert to +7 timezone
             news_published_time = self.parse_published_time(entry.get('published', ''))
             
-            # Create signal
+            # Get market cap data for tokens
+            market_caps = self.get_market_caps(entities) if entities else {}
+            
+            # Create signal with new BWEnews format
             signal = {
                 'event_id': content_hash,  # Use content hash for consistent deduplication
                 'ts_iso': news_published_time,
@@ -178,6 +189,11 @@ class WebSocketRSSClient:
                 'direction': direction,
                 'confidence': self.rss_sources[source_name]['trust_score'],
                 'raw_text': text,
+                'market_caps': market_caps,  # Add market cap data
+                'formatted_message': self.format_bwenews_message(
+                    event_type, entry.get('title', ''), entry.get('summary', ''), 
+                    entities, market_caps, entry.get('link', ''), news_published_time
+                ),
                 'extras': {
                     'content_hash': content_hash,
                     'source_url': entry.get('link', ''),
@@ -206,13 +222,116 @@ class WebSocketRSSClient:
         except Exception as e:
             logger.error(f"Error processing news update: {e}")
     
+    async def process_bwenews_message(self, source_name: str, data: Dict):
+        """Process BWEnews API message format"""
+        try:
+            # BWEnews API format:
+            # {
+            #   "source_name": "BWENEWS",
+            #   "news_title": "This is a test message news",
+            #   "coins_included": ["BTC", "ETH", "SOL"],
+            #   "url": "https://bwenews123.com/asdads",
+            #   "timestamp": 1745770800
+            # }
+            
+            # Convert BWEnews format to standard RSS entry format
+            entry = {
+                'title': data.get('news_title', ''),
+                'summary': data.get('news_title', ''),  # Use title as summary
+                'link': data.get('url', ''),
+                'published': self.timestamp_to_iso(data.get('timestamp', 0)),
+                'coins_included': data.get('coins_included', [])
+            }
+            
+            # Process as standard RSS entry
+            await self.process_rss_entry(source_name, entry)
+            
+        except Exception as e:
+            logger.error(f"Error processing BWEnews message: {e}")
+    
+    def timestamp_to_iso(self, timestamp: int) -> str:
+        """Convert Unix timestamp to ISO format"""
+        try:
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            return dt.isoformat()
+        except:
+            return datetime.now().isoformat()
+    
+    def get_market_caps(self, entities: List[str]) -> Dict[str, str]:
+        """Get market cap data for entities (mock data for now)"""
+        # Mock market cap data - in real implementation, this would call an API
+        mock_market_caps = {
+            'KTA': '$376M',
+            'NOICE': '$7M',
+            'BTC': '$1.2T',
+            'ETH': '$400B',
+            'SOL': '$50B'
+        }
+        
+        market_caps = {}
+        for entity in entities:
+            if entity.upper() in mock_market_caps:
+                market_caps[entity.upper()] = mock_market_caps[entity.upper()]
+            else:
+                # Generate mock market cap for unknown tokens
+                market_caps[entity.upper()] = '$1M'  # Default mock value
+        
+        return market_caps
+    
+    def format_bwenews_message(self, event_type: str, title: str, summary: str, 
+                              entities: List[str], market_caps: Dict[str, str], 
+                              url: str, published_time: str) -> str:
+        """Format BWEnews message in the requested format"""
+        
+        # Event type mapping
+        event_mapping = {
+            'LISTING': 'COINBASE LISTING',
+            'DELIST': 'COINBASE DELIST',
+            'HACK': 'SECURITY ALERT',
+            'OTHER': 'BWEnews Alert'
+        }
+        
+        event_title = event_mapping.get(event_type, 'BWEnews Alert')
+        
+        # Format entities with market caps
+        entities_with_caps = []
+        for entity in entities:
+            cap = market_caps.get(entity.upper(), 'N/A')
+            entities_with_caps.append(f"${entity}  MarketCap: {cap}")
+        
+        entities_text = '\n'.join(entities_with_caps) if entities_with_caps else 'N/A'
+        
+        # Format timestamp
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(published_time.replace('Z', '+00:00'))
+            formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            formatted_time = published_time
+        
+        # Create formatted message
+        message = f"""{event_title}: {title}
+{url}
+
+{event_title} 上新: {title}
+
+{entities_text}
+(Auto match could be wrong, 自动匹配可能不准确)
+————————————
+{formatted_time}
+source: {url}"""
+        
+        return message
+    
     def extract_event_type(self, text: str) -> tuple:
         """Extract event type, direction, and severity from text"""
         text_lower = text.lower()
         
         for event_type, patterns in self.event_patterns.items():
             for pattern in patterns:
-                if pattern.lower() in text_lower:
+                # Check both English and Korean patterns
+                if pattern.lower() in text_lower or pattern in text:
                     # Determine direction and severity based on event type
                     if event_type == 'LISTING':
                         return event_type, 'BULL', 0.9
@@ -220,42 +339,54 @@ class WebSocketRSSClient:
                         return event_type, 'BEAR', 0.9
                     elif event_type == 'HACK':
                         return event_type, 'BEAR', 0.95
-                    elif event_type == 'REGULATION':
-                        return event_type, 'BEAR', 0.85
-                    elif event_type == 'FED_SPEECH':
-                        # Analyze sentiment for FED_SPEECH
-                        if any(word in text_lower for word in ['hawkish', 'rate hike', 'tightening']):
-                            return event_type, 'BEAR', 0.9
-                        elif any(word in text_lower for word in ['dovish', 'rate cut', 'easing']):
-                            return event_type, 'BULL', 0.9
-                        else:
-                            return event_type, 'NEUTRAL', 0.7
-                    elif event_type == 'POLITICAL_POST':
-                        return event_type, 'NEUTRAL', 0.6
-                    elif event_type == 'TECHNICAL_UPGRADE':
-                        return event_type, 'BULL', 0.7
-                    elif event_type == 'PARTNERSHIP':
-                        return event_type, 'BULL', 0.8
+                    else:
+                        # Only token-specific events are processed
+                        return event_type, 'NEUTRAL', 0.5
         
         return 'OTHER', 'UNKNOWN', 0.3
     
-    def extract_entities(self, text: str) -> List[str]:
-        """Extract entities from text (basic implementation)"""
+    def extract_entities(self, text: str, coins_included: List[str] = None) -> List[str]:
+        """Extract entities from text - supports ANY token/coin"""
         entities = []
         
-        # Extract common crypto entities
-        crypto_entities = ['BTC', 'ETH', 'SOL', 'ADA', 'DOT', 'LINK', 'UNI', 'AVAX']
-        for entity in crypto_entities:
-            if entity in text.upper():
-                entities.append(entity)
+        # First, add coins from BWEnews coins_included field
+        if coins_included:
+            for coin in coins_included:
+                if isinstance(coin, str) and len(coin) >= 2:
+                    entities.append(coin.upper())
         
-        # Extract company names (basic)
-        company_keywords = ['Binance', 'Coinbase', 'FTX', 'Kraken', 'Gemini']
-        for company in company_keywords:
-            if company in text:
-                entities.append(company)
+        # Extract ANY crypto token (2-10 uppercase letters)
+        import re
+        crypto_pattern = r'\b[A-Z]{2,10}\b'
+        potential_tokens = re.findall(crypto_pattern, text.upper())
         
-        return entities[:5]  # Limit to 5 entities
+        # Filter out common non-crypto words
+        exclude_words = {
+            'THE', 'AND', 'FOR', 'ARE', 'BUT', 'NOT', 'YOU', 'ALL', 'CAN', 'HER', 'WAS', 'ONE', 'OUR',
+            'HAD', 'BUT', 'HIS', 'HOW', 'ITS', 'MAY', 'NEW', 'NOW', 'OLD', 'SEE', 'TWO', 'WHO', 'BOY',
+            'DID', 'MAN', 'MEN', 'PUT', 'SAY', 'SHE', 'TOO', 'USE', 'WAY', 'YET', 'GET', 'GO', 'IF',
+            'IN', 'IS', 'IT', 'NO', 'OF', 'ON', 'OR', 'TO', 'UP', 'WE', 'AS', 'AT', 'BE', 'BY', 'DO',
+            'GO', 'HE', 'IF', 'IN', 'IS', 'IT', 'ME', 'MY', 'NO', 'OF', 'ON', 'OR', 'SO', 'TO', 'UP',
+            'US', 'WE', 'AM', 'AN', 'AS', 'AT', 'BE', 'BY', 'DO', 'GO', 'HE', 'IF', 'IN', 'IS', 'IT',
+            'ME', 'MY', 'NO', 'OF', 'ON', 'OR', 'SO', 'TO', 'UP', 'US', 'WE', 'AM', 'AN', 'AS', 'AT'
+        }
+        
+        for token in potential_tokens:
+            if token not in exclude_words and len(token) >= 2:
+                entities.append(token)
+        
+        # Extract exchange names
+        exchanges = [
+            'Binance', 'Coinbase', 'FTX', 'Kraken', 'Gemini', 'Bithumb', 'Upbit', 'Korbit',
+            '빗썸', '업비트', '코빗', '바이낸스코리아', 'OKX', 'KuCoin', 'Huobi', 'Gate.io'
+        ]
+        for exchange in exchanges:
+            if exchange in text:
+                entities.append(exchange)
+        
+        # Remove duplicates and limit
+        unique_entities = list(dict.fromkeys(entities))
+        return unique_entities[:8]  # Increased limit for more tokens
     
     def parse_published_time(self, published: str) -> str:
         """Parse published time and convert to Vietnam timezone (+7)"""
@@ -291,7 +422,7 @@ class WebSocketRSSClient:
             future = self.kafka_producer.send(
                 'news.signals.v1',
                 value=signal,
-                key=signal['event_id'].encode()
+                key=signal['event_id']  # Remove .encode() - key_serializer handles encoding
             )
             await asyncio.get_event_loop().run_in_executor(None, future.get, 10)
             logger.info(f"Published real-time signal to Kafka: {signal['event_id']}")
@@ -323,15 +454,34 @@ class WebSocketRSSClient:
                     async with session.get(source_config['url']) as response:
                         if response.status == 200:
                             content = await response.text()
-                            feed = feedparser.parse(content)
                             
-                            for entry in feed.entries:
-                                await self.process_rss_entry(source_name, {
-                                    'title': entry.get('title', ''),
-                                    'summary': entry.get('summary', ''),
-                                    'link': entry.get('link', ''),
-                                    'published': entry.get('published', '')
-                                })
+                            # Check if it's JSON API or RSS XML
+                            if source_config.get('category') == 'exchange_notice':
+                                # Handle JSON API responses
+                                try:
+                                    data = json.loads(content)
+                                    entries = data if isinstance(data, list) else data.get('data', [])
+                                    
+                                    for entry in entries:
+                                        await self.process_rss_entry(source_name, {
+                                            'title': entry.get('title', entry.get('subject', '')),
+                                            'summary': entry.get('content', entry.get('body', '')),
+                                            'link': entry.get('url', entry.get('link', '')),
+                                            'published': entry.get('created_at', entry.get('date', ''))
+                                        })
+                                except json.JSONDecodeError:
+                                    logger.error(f"Failed to parse JSON from {source_name}")
+                            else:
+                                # Handle RSS XML
+                                feed = feedparser.parse(content)
+                                
+                                for entry in feed.entries:
+                                    await self.process_rss_entry(source_name, {
+                                        'title': entry.get('title', ''),
+                                        'summary': entry.get('summary', ''),
+                                        'link': entry.get('link', ''),
+                                        'published': entry.get('published', '')
+                                    })
                 
                 # Wait before next poll
                 await asyncio.sleep(30)  # Poll every 30 seconds
