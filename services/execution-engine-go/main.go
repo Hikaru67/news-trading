@@ -151,31 +151,69 @@ func NewExecutionEngine() (*ExecutionEngine, error) {
 	}, nil
 }
 
-// mapToSymbol maps entities to trading symbols
+// mapToSymbol maps entities to trading symbols - supports ANY token
 func (e *ExecutionEngine) mapToSymbol(entities []string) string {
 	if len(entities) == 0 {
 		return ""
 	}
 
+	// Enhanced symbol mapping for major tokens
 	symbolMapping := map[string]string{
-		"BTC": "BTCUSDT",
-		"ETH": "ETHUSDT",
-		"BNB": "BNBUSDT",
-		"ADA": "ADAUSDT",
-		"SOL": "SOLUSDT",
-		"DOT": "DOTUSDT",
-		"LINK": "LINKUSDT",
-		"MATIC": "MATICUSDT",
-		"AVAX": "AVAXUSDT",
-		"UNI": "UNIUSDT",
+		"BTC": "BTCUSDT", "ETH": "ETHUSDT", "BNB": "BNBUSDT", "ADA": "ADAUSDT",
+		"SOL": "SOLUSDT", "DOT": "DOTUSDT", "LINK": "LINKUSDT", "MATIC": "MATICUSDT",
+		"AVAX": "AVAXUSDT", "UNI": "UNIUSDT", "DOGE": "DOGEUSDT", "SHIB": "SHIBUSDT",
+		"XRP": "XRPUSDT", "LTC": "LTCUSDT", "BCH": "BCHUSDT", "ETC": "ETCUSDT",
+		"ATOM": "ATOMUSDT", "NEAR": "NEARUSDT", "FTM": "FTMUSDT", "ALGO": "ALGOUSDT",
+		"VET": "VETUSDT", "ICP": "ICPUSDT", "FIL": "FILUSDT", "TRX": "TRXUSDT",
+		"EOS": "EOSUSDT", "XLM": "XLMUSDT", "AAVE": "AAVEUSDT", "SUSHI": "SUSHIUSDT",
+		"COMP": "COMPUSDT", "MKR": "MKRUSDT", "SNX": "SNXUSDT", "YFI": "YFIUSDT",
+		"CRV": "CRVUSDT", "1INCH": "1INCHUSDT", "BAL": "BALUSDT", "ZRX": "ZRXUSDT",
 	}
 
-	entity := strings.ToUpper(entities[0])
-	if symbol, exists := symbolMapping[entity]; exists {
-		return symbol
+	// Try to find the first valid crypto token
+	for _, entity := range entities {
+		entity = strings.ToUpper(strings.TrimSpace(entity))
+		
+		// Skip non-crypto entities
+		if e.isExchangeName(entity) {
+			continue
+		}
+		
+		// Check if it's a known token
+		if symbol, exists := symbolMapping[entity]; exists {
+			return symbol
+		}
+		
+		// For unknown tokens, create USDT pair (support 2-10 chars)
+		if len(entity) >= 2 && len(entity) <= 10 {
+			return entity + "USDT"
+		}
 	}
 	
-	return entity + "USDT"
+	// Fallback to first entity
+	if len(entities) > 0 {
+		entity := strings.ToUpper(strings.TrimSpace(entities[0]))
+		if len(entity) >= 2 && len(entity) <= 10 {
+			return entity + "USDT"
+		}
+	}
+	
+	return ""
+}
+
+// isExchangeName checks if entity is an exchange name
+func (e *ExecutionEngine) isExchangeName(entity string) bool {
+	exchanges := []string{
+		"BINANCE", "COINBASE", "FTX", "KRAKEN", "GEMINI", "BITHUMB", "UPBIT", "KORBIT",
+		"OKX", "KUCOIN", "HUOBI", "GATE", "BYBIT", "BITFINEX", "BITSTAMP", "POLONIEX",
+	}
+	
+	for _, exchange := range exchanges {
+		if strings.Contains(entity, exchange) {
+			return true
+		}
+	}
+	return false
 }
 
 // calculatePositionSize calculates position size based on signal strength
@@ -339,6 +377,12 @@ func (e *ExecutionEngine) processSignals() error {
 			var signal Signal
 			if err := json.Unmarshal(message.Value, &signal); err != nil {
 				log.Printf("Error unmarshaling signal: %v", err)
+				continue
+			}
+			
+			// Filter by event type (only process token-specific events)
+			if signal.EventType != "LISTING" && signal.EventType != "DELIST" && signal.EventType != "HACK" {
+				log.Printf("Skipped non-token-specific event: %s (severity: %.2f)", signal.EventType, signal.Severity)
 				continue
 			}
 			

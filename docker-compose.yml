@@ -98,6 +98,8 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://trading_user:trading_pass@postgres:5432/news_trading
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
 
   # Bybit API Client Service (Go)
   bybit-api-client:
@@ -269,6 +271,19 @@ services:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
       - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+
+  # Kafka UI Dashboard
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    depends_on:
+      - kafka
+      - zookeeper
 
 volumes:
   postgres_data:

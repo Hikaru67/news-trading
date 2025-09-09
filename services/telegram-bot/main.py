@@ -54,31 +54,21 @@ class TelegramBot:
             enable_auto_commit=True
         )
         
-        # Message templates - ONLY HIGH IMPACT EVENTS
+        # Message templates - ONLY TOKEN-SPECIFIC EVENTS
         self.message_templates = {
             'LISTING': {
                 'emoji': '🚀',
-                'title': 'NEW LISTING ALERT',
+                'title': 'Listing',
                 'color': '🟢'
             },
             'DELIST': {
                 'emoji': '⚠️',
-                'title': 'DELISTING ALERT',
-                'color': '🔴'
-            },
-            'FED_SPEECH': {
-                'emoji': '🏦',
-                'title': 'FED ANNOUNCEMENT',
-                'color': '🟡'
-            },
-            'REGULATION': {
-                'emoji': '⚖️',
-                'title': 'CRITICAL REGULATION',
+                'title': 'Delist',
                 'color': '🔴'
             },
             'HACK': {
                 'emoji': '💥',
-                'title': 'SECURITY ALERT',
+                'title': 'Hack',
                 'color': '🔴'
             }
         }
@@ -99,7 +89,7 @@ class TelegramBot:
         self.redis_client.setex(f"telegram_sent:{signal_id}", self.sent_signals_ttl, "1")
 
     def format_message(self, signal: Dict) -> str:
-        """Format signal into Telegram message"""
+        """Format signal into compact Telegram message"""
         try:
             event_type = signal.get('event_type', 'OTHER')
             template = self.message_templates.get(event_type)
@@ -114,39 +104,32 @@ class TelegramBot:
             if ts:
                 try:
                     dt = datetime.fromisoformat(ts)
-                    formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S GMT+7')
+                    formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S')
                 except:
                     formatted_time = ts
             else:
                 vietnam_tz = timezone(timedelta(hours=7))
-                formatted_time = datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S GMT+7')
+                formatted_time = datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S')
             
-            # Format entities
-            entities = signal.get('entities', [])
-            entities_text = ', '.join(entities[:3]) if entities else 'N/A'
+            # Get primary entity and source
+            primary_entity = signal.get('primary_entity', '')
+            source = signal.get('source', 'N/A')
+            headline = signal.get('headline', 'N/A')
+            url = signal.get('url', 'N/A')
             
-            # Format confidence
-            confidence = signal.get('confidence', 0)
-            confidence_bar = '🟢' * int(confidence * 5) + '⚪' * (5 - int(confidence * 5))
+            # Format source name for display
+            source_display = source.upper() if source else 'UNKNOWN'
             
-            # Build message
-            message = f"""
-{template['emoji']} *{template['title']}* {template['emoji']}
+            # Build compact message
+            message = f"""*{source_display} {template['title']}:* {headline}
 
-📰 *Headline:*
-{signal.get('headline', 'N/A')}
+*{source_display}上新:* {headline}
 
-🏢 *Source:* {signal.get('source', 'N/A')}
-🎯 *Entities:* {entities_text}
-📊 *Confidence:* {confidence_bar} ({confidence:.1%})
-⏰ *Time:* {formatted_time}
-
-🔗 *Link:* {signal.get('url', 'N/A')}
-
-{template['color']} *Event Type:* {event_type}
-📈 *Direction:* {signal.get('direction', 'UNKNOWN')}
-⚠️ *Severity:* {signal.get('severity', 0):.1f}
-"""
+*${primary_entity}* MarketCap: $N/A
+(Auto match could be wrong, 自动匹配可能不准确)
+————————————
+{formatted_time}
+source: {url}"""
             
             return message.strip()
             
