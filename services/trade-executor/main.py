@@ -15,6 +15,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 from kafka import KafkaConsumer, KafkaProducer
 from prometheus_client import Counter, Histogram, start_http_server
+from aiohttp import web
 
 # Configure logging
 logging.basicConfig(
@@ -37,18 +38,24 @@ class TradeExecutor:
         self.redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
         self.redis_client = redis.from_url(self.redis_url)
         
+        # Mode / HTTP
+        self.input_mode = os.getenv('INPUT_MODE', 'kafka').lower()
+        self.http_port = int(os.getenv('TRADE_EXECUTOR_HTTP_PORT', '8015'))
+
         # Kafka setup
         self.kafka_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092').split(',')
         
-        # Consumer for trade signals
-        self.consumer = KafkaConsumer(
-            'trading.signals.v1',
-            bootstrap_servers=self.kafka_servers,
-            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-            group_id='trade-executor-group',
-            auto_offset_reset='latest',
-            enable_auto_commit=True
-        )
+        # Consumer for trade signals (Kafka mode only)
+        self.consumer = None
+        if self.input_mode == 'kafka':
+            self.consumer = KafkaConsumer(
+                'trading.signals.v1',
+                bootstrap_servers=self.kafka_servers,
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                group_id='trade-executor-group',
+                auto_offset_reset='latest',
+                enable_auto_commit=True
+            )
         
         # Producer for trade results
         self.producer = KafkaProducer(
@@ -88,6 +95,7 @@ class TradeExecutor:
         self.default_trade_amount = float(os.getenv('DEFAULT_TRADE_AMOUNT', '100'))  # USDT
         self.max_trade_amount = float(os.getenv('MAX_TRADE_AMOUNT', '1000'))  # USDT
         self.min_confidence = float(os.getenv('MIN_TRADE_CONFIDENCE', '0.6'))
+        self.real_trade_enabled = os.getenv('REAL_TRADE_ENABLED', 'false').lower() in ('1', 'true', 'yes')
         
         # Rate limiting
         self.last_trade_time = {}
@@ -132,12 +140,15 @@ class TradeExecutor:
             action = signal.get('action', 'BUY')
             token_symbol = signal.get('token_symbol', '')
             
-            # For demo purposes, we'll simulate the trade
-            # In production, you would implement actual API calls here
-            logger.info(f"Executing {action} {trade_amount} USDT worth of {token_symbol} on {config['name']} spot ({pair})")
-            
-            # Simulate API call delay
-            await asyncio.sleep(0.5)
+            # Real trade path (not fully implemented - placeholder)
+            if self.real_trade_enabled and config['enabled']:
+                logger.info(f"[REAL] Place {action} spot order on {config['name']} {pair} amount={trade_amount}")
+                # TODO: Implement exchange-specific signed requests (market order)
+                await asyncio.sleep(0.2)
+            else:
+                # Simulated path
+                logger.info(f"Executing {action} {trade_amount} USDT worth of {token_symbol} on {config['name']} spot ({pair})")
+                await asyncio.sleep(0.5)
             
             # Simulate trade result (90% success rate for demo)
             import random
@@ -202,11 +213,15 @@ class TradeExecutor:
             action = signal.get('action', 'BUY')
             token_symbol = signal.get('token_symbol', '')
             
-            # For demo purposes, we'll simulate the trade
-            logger.info(f"Executing {action} {trade_amount} USDT worth of {token_symbol} on {config['name']} perp ({contract})")
-            
-            # Simulate API call delay
-            await asyncio.sleep(0.5)
+            # Real trade path (not fully implemented - placeholder)
+            if self.real_trade_enabled and config['enabled']:
+                logger.info(f"[REAL] Place {action} perp order on {config['name']} {contract} amount={trade_amount}")
+                # TODO: Implement exchange-specific signed requests (market order)
+                await asyncio.sleep(0.2)
+            else:
+                # Simulated path
+                logger.info(f"Executing {action} {trade_amount} USDT worth of {token_symbol} on {config['name']} perp ({contract})")
+                await asyncio.sleep(0.5)
             
             # Simulate trade result (90% success rate for demo)
             import random
@@ -356,20 +371,48 @@ class TradeExecutor:
         else:
             logger.warning("No exchanges configured for trading - running in simulation mode")
         
-        # Process trade signals
-        logger.info("Starting trade signal processing...")
-        try:
-            for message in self.consumer:
+        if self.input_mode == 'http':
+            app = web.Application()
+
+            async def handle_health(request):
+                return web.json_response({"status": "ok", "real": self.real_trade_enabled})
+
+            async def handle_signal(request):
                 try:
-                    signal = message.value
+                    signal = await request.json()
+                except Exception:
+                    return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
+                try:
                     await self.process_trade_signal(signal)
+                    return web.json_response({"ok": True})
                 except Exception as e:
-                    logger.error(f"Error processing message: {e}")
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"Error in trade processing loop: {e}")
-            raise
+                    logger.error(f"HTTP signal error: {e}")
+                    return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+            app.router.add_get('/health', handle_health)
+            app.router.add_post('/signal', handle_signal)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '0.0.0.0', self.http_port)
+            await site.start()
+            logger.info(f"HTTP intake listening on 0.0.0.0:{self.http_port}")
+            while True:
+                await asyncio.sleep(3600)
+        else:
+            # Process trade signals via Kafka
+            logger.info("Starting trade signal processing (Kafka)...")
+            try:
+                for message in self.consumer:
+                    try:
+                        signal = message.value
+                        await self.process_trade_signal(signal)
+                    except Exception as e:
+                        logger.error(f"Error processing message: {e}")
+                        continue
+                        
+            except Exception as e:
+                logger.error(f"Error in trade processing loop: {e}")
+                raise
 
 def main():
     """Main entry point"""
