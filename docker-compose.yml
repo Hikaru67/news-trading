@@ -121,29 +121,7 @@ services:
       - ./logs:/root/logs
 
   # BWEnews Trading Services
-  bwenews-trader:
-    build:
-      context: .
-      dockerfile: services/bwenews-trader/Dockerfile
-    environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - kafka
-      - redis
-    restart: unless-stopped
-
-  bwenews-mexc-trader:
-    build:
-      context: .
-      dockerfile: services/bwenews-mexc-trader/Dockerfile
-    environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - kafka
-      - redis
-    restart: unless-stopped
+  # (removed legacy bwenews-trader and bwenews-mexc-trader)
 
   
 
