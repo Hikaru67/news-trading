@@ -13,6 +13,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 
 import requests
+import aiohttp
 from kafka import KafkaConsumer
 from prometheus_client import Counter, Histogram, start_http_server
 from os import getenv
@@ -84,6 +85,9 @@ class TelegramBot:
         
         # Deduplication
         self.sent_signals_ttl = 86400  # 24 hours in seconds
+        
+        # Shared HTTP session for async sends (HTTP mode)
+        self.http_session = None
 
     def is_signal_sent(self, signal_id: str) -> bool:
         """Check if signal was already sent to Telegram"""
@@ -343,7 +347,22 @@ class TelegramBot:
                         
                         # Send to Telegram
                         t_send_start = time.time()
-                        if self.send_telegram_message(formatted_message):
+                        ok = False
+                        if self.http_session is None:
+                            try:
+                                timeout = aiohttp.ClientTimeout(total=4)
+                                connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
+                                self.http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+                            except Exception:
+                                self.http_session = None
+                        if self.http_session is not None:
+                            try:
+                                ok = await self.async_send_telegram_message(formatted_message)
+                            except Exception as e:
+                                logger.error(f"Async send failed in Kafka mode: {e}")
+                        if not ok:
+                            ok = self.send_telegram_message(formatted_message)
+                        if ok:
                             t_after_send = time.time()
                             logger.info(
                                 f"Latency | send_ms={(t_after_send - t_send_start)*1000:.1f} | end_to_end_ms={(t_after_send - t_receive)*1000:.1f}"
@@ -414,7 +433,17 @@ class TelegramBot:
 
                 # Send
                 t_send_start = time.time()
-                sent = self.send_telegram_message(formatted_message)
+                sent = False
+                if self.http_session is None:
+                    # initialize session lazily
+                    timeout = aiohttp.ClientTimeout(total=4)
+                    connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
+                    self.http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+                try:
+                    sent = await self.async_send_telegram_message(formatted_message)
+                except Exception as e:
+                    logger.error(f"async send failed, fallback to sync: {e}")
+                    sent = self.send_telegram_message(formatted_message)
                 t_after_send = time.time()
 
                 metrics = {
@@ -446,8 +475,12 @@ class TelegramBot:
             await site.start()
 
             # Keep running
-            while True:
-                await asyncio.sleep(3600)
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            finally:
+                if self.http_session:
+                    await self.http_session.close()
 
 def main():
     """Main entry point"""
