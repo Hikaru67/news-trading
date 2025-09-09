@@ -89,25 +89,24 @@ class ExchangeChecker:
         self.last_check_time = {}
         self.min_check_interval = 5  # seconds between checks
 
-    async def fetch_exchange_data(self, exchange_key: str) -> bool:
+    async def fetch_exchange_data(self, exchange_key: str, session: aiohttp.ClientSession) -> bool:
         """Fetch trading pairs and contracts from exchange"""
         exchange = self.exchanges[exchange_key]
         
         try:
-            async with aiohttp.ClientSession() as session:
-                # Fetch spot trading pairs
-                spot_pairs = await self.fetch_spot_pairs(session, exchange_key)
-                if spot_pairs:
-                    exchange['trading_pairs'] = set(spot_pairs)
-                    logger.info(f"Fetched {len(spot_pairs)} spot pairs from {exchange['name']}")
-                
-                # Fetch perpetual contracts
-                perp_contracts = await self.fetch_perp_contracts(session, exchange_key)
-                if perp_contracts:
-                    exchange['perp_contracts'] = set(perp_contracts)
-                    logger.info(f"Fetched {len(perp_contracts)} perp contracts from {exchange['name']}")
-                
-                return True
+            # Fetch spot trading pairs
+            spot_pairs = await self.fetch_spot_pairs(session, exchange_key)
+            if spot_pairs:
+                exchange['trading_pairs'] = set(spot_pairs)
+                logger.info(f"Fetched {len(spot_pairs)} spot pairs from {exchange['name']}")
+            
+            # Fetch perpetual contracts
+            perp_contracts = await self.fetch_perp_contracts(session, exchange_key)
+            if perp_contracts:
+                exchange['perp_contracts'] = set(perp_contracts)
+                logger.info(f"Fetched {len(perp_contracts)} perp contracts from {exchange['name']}")
+            
+            return True
                 
         except Exception as e:
             logger.error(f"Error fetching data from {exchange['name']}: {e}")
@@ -284,6 +283,22 @@ class ExchangeChecker:
     async def fetch_price(self, session: aiohttp.ClientSession, exchange_key: str, market: str, token_symbol: str, symbols: List[str]) -> Optional[float]:
         """Fetch approximate price in USDT for the chosen market/symbol."""
         try:
+            # Short TTL cache to reduce duplicate network calls
+            cache_symbol = None
+            for s in symbols:
+                if 'USDT' in s.upper():
+                    cache_symbol = s
+                    break
+            if not cache_symbol:
+                cache_symbol = f"{token_symbol.upper()}USDT"
+            cache_key = f"px:{exchange_key}:{market}:{cache_symbol}"
+            cached = self.redis_client.get(cache_key)
+            if cached:
+                try:
+                    return float(cached)
+                except Exception:
+                    pass
+
             # Try to construct a USDT pair/contract
             # Pick first symbol that contains USDT
             usdt_symbol = None
@@ -306,7 +321,9 @@ class ExchangeChecker:
                     async with session.get(url, headers=common_headers, timeout=5) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            return float(data.get('price'))
+                            price = float(data.get('price'))
+                            self.redis_client.setex(cache_key, 3, str(price))
+                            return price
                         else:
                             try:
                                 text = await resp.text()
@@ -332,11 +349,15 @@ class ExchangeChecker:
                                 # Some APIs return object instead of list
                                 last_price = arr.get('lastPrice') or arr.get('last')
                                 if last_price is not None:
-                                    return float(last_price)
+                                    price = float(last_price)
+                                    self.redis_client.setex(cache_key, 3, str(price))
+                                    return price
                             if isinstance(arr, list) and arr:
                                 last_price = arr[0].get('lastPrice') or arr[0].get('last')
                                 if last_price is not None:
-                                    return float(last_price)
+                                    price = float(last_price)
+                                    self.redis_client.setex(cache_key, 3, str(price))
+                                    return price
                         else:
                             try:
                                 text = await resp.text()
@@ -354,7 +375,9 @@ class ExchangeChecker:
                         data = await resp.json()
                         lst = data.get('result', {}).get('list', [])
                         if lst:
-                            return float(lst[0].get('lastPrice'))
+                            price = float(lst[0].get('lastPrice'))
+                            self.redis_client.setex(cache_key, 3, str(price))
+                            return price
             elif exchange_key == 'gate':
                 if market == 'spot':
                     # Gate spot uses pair like KTA_USDT
@@ -365,7 +388,9 @@ class ExchangeChecker:
                         if resp.status == 200:
                             data = await resp.json()
                             if isinstance(data, list) and data:
-                                return float(data[0].get('last'))
+                                price = float(data[0].get('last'))
+                                self.redis_client.setex(cache_key, 3, str(price))
+                                return price
                 else:
                     url = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
                     logger.info(f"[price] Gate perp list url=curl -s '{url}' (filter symbol={usdt_symbol})")
@@ -374,7 +399,9 @@ class ExchangeChecker:
                             data = await resp.json()
                             for item in data:
                                 if item.get('contract') == usdt_symbol:
-                                    return float(item.get('last'))
+                                    price = float(item.get('last'))
+                                    self.redis_client.setex(cache_key, 3, str(price))
+                                    return price
         except Exception as e:
             logger.error(f"Price fetch error: {e}")
         return None
@@ -508,10 +535,14 @@ class ExchangeChecker:
         # Start Prometheus metrics server
         start_http_server(8004)
         
-        # Initial exchange data fetch
-        logger.info("Fetching initial exchange data...")
-        for exchange_key in self.exchanges.keys():
-            await self.fetch_exchange_data(exchange_key)
+        # Shared HTTP session
+        timeout = aiohttp.ClientTimeout(total=5)
+        connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as shared_session:
+            # Initial exchange data fetch
+            logger.info("Fetching initial exchange data...")
+            for exchange_key in self.exchanges.keys():
+                await self.fetch_exchange_data(exchange_key, shared_session)
 
         mode = os.getenv('INPUT_MODE', 'kafka').lower()
         if mode == 'http':
@@ -536,7 +567,7 @@ class ExchangeChecker:
                 try:
                     best = self.choose_best_cex(token) if token else None
                     if best:
-                        async with aiohttp.ClientSession() as session2:
+                        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session2:
                             price_val = await self.fetch_price(session2, best['exchange'], best['market'], token, best.get('symbols', []))
                             # If current best is not MEXC, probe MEXC perp to prefer it when available
                             if best.get('exchange') != 'mexc':
@@ -555,7 +586,7 @@ class ExchangeChecker:
                     # Fallback: if no best or no price, probe MEXC perp directly with TOKEN_USDT underscore format
                     if (not best or price_val is None) and token:
                         try:
-                            async with aiohttp.ClientSession() as session_fallback:
+                            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session_fallback:
                                 fb_price = await self.fetch_price(session_fallback, 'mexc', 'perp', token, [f"{token.upper()}_USDT"])
                                 if fb_price is not None:
                                     best = {
@@ -585,7 +616,7 @@ class ExchangeChecker:
                 tele_url = os.getenv('TELEGRAM_HTTP_URL')
                 if tele_url:
                     try:
-                        async with aiohttp.ClientSession() as session3:
+                        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session3:
                             async with session3.post(tele_url, json=signal, timeout=10) as resp:
                                 tele_forwarded = resp.status == 200
                     except Exception as e:
@@ -598,7 +629,7 @@ class ExchangeChecker:
                     trade_signal = self.create_trade_signal(signal, self.check_token_listings(token) if token else {})
                     if trade_signal:
                         try:
-                            async with aiohttp.ClientSession() as session4:
+                            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session4:
                                 async with session4.post(trade_url, json=trade_signal, timeout=10) as resp:
                                     trade_forwarded = resp.status == 200
                         except Exception as e:
