@@ -1,17 +1,16 @@
-# News Trading System - Phase 1 MVP
+# News Trading System - BWEnews Real-Time Flow
 
-A real-time news-driven trading system that collects cryptocurrency news from RSS feeds and executes trades based on predefined strategies.
+Real-time news-driven trading system using BWEnews (RSS + WebSocket) as the single source. Low-latency direct HTTP fanout sends signals concurrently to Telegram and the Exchange Checker, with an optional HTTP trade executor.
 
 ## 🚀 Features
 
-- **BWEnews Integration**: Real-time news from BWEnews RSS feed and WebSocket API
-- **Signal Processing**: Detects listing/delisting/hack events and normalizes them into trading signals
-- **Kafka Integration**: Uses Apache Kafka for reliable message queuing
-- **PostgreSQL Database**: Stores trades, orders, and audit logs
-- **Redis Caching**: Handles deduplication and hot state management
-- **AI/ML Processing**: BERT sentiment analysis and ML event classification
-- **Multi-Exchange Trading**: Bybit and MEXC exchange integration
-- **Monitoring**: Prometheus metrics and Grafana dashboards
+- BWEnews Integration (RSS + WebSocket)
+- Direct HTTP fanout: `bwenews-client` → `telegram-bot` and `exchange-checker`
+- Telegram fast-ack mode (<1 ms HTTP response; background send) or full wait mode
+- Exchange Checker: prioritizes CEX (MEXC > Bybit > Gate), prefers perp, symbol aliasing, price lookup
+- Optional Trade Executor (HTTP intake). Simulated by default; can enable real mode with API keys
+- Redis deduplication; Kafka retained for non-critical paths
+- Prometheus + Grafana monitoring
 
 ## 📋 Prerequisites
 
@@ -30,94 +29,50 @@ cd news-trading
 
 ### 2. Environment Variables
 
-Create a `.env` file in the root directory:
+Use `env.example` as reference and create a `.env` file. Key variables:
 
-```bash
-# Bybit API (optional for Phase 1 - using simulated trading)
-BYBIT_API_KEY=your_api_key_here
-BYBIT_SECRET_KEY=your_secret_key_here
-
-# Database (defaults are fine for local development)
-DATABASE_URL=postgresql://trading_user:trading_pass@postgres:5432/news_trading
-REDIS_URL=redis://redis:6379
-KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+```
+DIRECT_FANOUT_ENABLED=true
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHANNEL_ID=@your_channel_or_chat_id
+TELEGRAM_FAST_ACK=true
+TELEGRAM_HTTP_PORT=8013
+EXCHANGE_CHECKER_HTTP_PORT=8014
+TRADE_EXECUTOR_HTTP_PORT=8015
+TRADE_EXECUTOR_HTTP_URL=http://trade-executor:8015/signal
+INPUT_MODE=http
+REAL_TRADE_ENABLED=false  # set true with API keys to enable real orders
 ```
 
 ### 3. Start Services
 
 ```bash
-# Start all services
-docker-compose up -d
+docker compose up -d
+docker compose ps
 
-# Check service status
-docker-compose ps
-
-# View logs
-docker-compose logs -f bwenews-client
-docker-compose logs -f execution-engine
+# Logs
+docker compose logs -f bwenews-client
+docker compose logs -f exchange-checker
+docker compose logs -f telegram-bot
+docker compose logs -f trade-executor
 ```
 
 ### 4. Access Services
 
-- **Grafana Dashboard**: http://localhost:3000 (admin/admin)
-- **Prometheus**: http://localhost:9090
+- Grafana: http://localhost:3001 (admin/admin)
+- Prometheus: http://localhost:9091
 - **PostgreSQL**: localhost:5432
 - **Redis**: localhost:6379
 - **Kafka**: localhost:9092
 
 ## 📊 Monitoring
 
-### Prometheus Metrics
+Prometheus metrics are exposed by services; Grafana dashboards can be pointed to Prometheus at 9091.
 
-The system exposes the following metrics:
+## ⚙️ Modes
 
-- `signals_processed_total`: Total signals processed by source and event type
-- `signals_published_total`: Total signals published to Kafka
-- `signals_consumed_total`: Total signals consumed by execution engine
-- `trades_executed_total`: Total trades executed by symbol and side
-- `signal_processing_seconds`: Time spent processing signals
-- `trade_execution_seconds`: Time spent executing trades
-
-### Grafana Dashboards
-
-Import the provided dashboards to monitor:
-- Signal processing performance
-- Trading activity
-- System health
-- Error rates
-
-## 🗄️ Database Schema
-
-### Core Tables
-
-- **users**: User accounts and risk limits
-- **orders**: Trading orders
-- **trades**: Executed trades
-- **signals**: Processed news signals
-- **audit_logs**: System audit trail
-- **risk_limits**: User risk management
-
-### Sample Queries
-
-```sql
--- View recent signals
-SELECT event_type, headline, processed_at 
-FROM signals 
-ORDER BY processed_at DESC 
-LIMIT 10;
-
--- View trading activity
-SELECT symbol, side, quantity, price, executed_at 
-FROM trades 
-ORDER BY executed_at DESC 
-LIMIT 10;
-
--- Check user positions
-SELECT symbol, SUM(CASE WHEN side = 'B' THEN quantity ELSE -quantity END) as net_position
-FROM trades 
-WHERE user_id = 'your_user_id'
-GROUP BY symbol;
-```
+- Telegram fast-ack: returns immediately; disable by `TELEGRAM_FAST_ACK=false`.
+- Trade Executor real mode: `REAL_TRADE_ENABLED=true` and set exchange API keys.
 
 ## 🔧 Configuration
 
@@ -157,10 +112,9 @@ self.playbooks = {
    docker-compose logs bwenews-client | grep "Processed"
    ```
 
-2. **Test Signal Processing**:
+2. **Test Telegram HTTP intake**:
    ```bash
-   # Check if signals are being processed
-   docker-compose logs execution-engine | grep "Received signal"
+   curl -s -X POST http://localhost:8013/signal -H 'Content-Type: application/json' -d '{"event_id":"test","ts_iso":"2025-01-01T00:00:00+07:00","source":"bench","headline":"TEST","url":"https://example.com","event_type":"LISTING","primary_entity":"TEST","entities":["UPBIT","LISTING","TEST"],"severity":0.9,"direction":"BULL","confidence":0.95}'
    ```
 
 3. **Test Database**:
@@ -175,15 +129,9 @@ self.playbooks = {
    SELECT COUNT(*) FROM trades;
    ```
 
-### Automated Testing
+### Performance Check
 
-```bash
-# Run tests
-pytest tests/
-
-# Run with coverage
-pytest --cov=services tests/
-```
+Use `perf_test_e2e.py` to measure HTTP latencies for Telegram and Exchange Checker.
 
 ## 📈 Performance
 
