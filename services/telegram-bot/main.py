@@ -281,6 +281,47 @@ class TelegramBot:
             logger.error(f"Error sending Telegram message: {e}")
             return False
 
+    async def async_send_telegram_message(self, message: str) -> bool:
+        """Async send using shared aiohttp session (HTTP mode)."""
+        if not self.enabled:
+            logger.warning("Telegram bot not enabled")
+            return False
+        if self.http_session is None:
+            logger.error("HTTP session not initialized for async send")
+            return False
+        try:
+            current_time = time.time()
+            if current_time - self.last_message_time < self.min_interval:
+                await asyncio.sleep(self.min_interval - (current_time - self.last_message_time))
+            url = f"{self.api_base}/bot{self.bot_token}/sendMessage"
+            data = {
+                'chat_id': self.channel_id,
+                'text': message,
+                'disable_web_page_preview': True
+            }
+            send_start = time.time()
+            timeout = aiohttp.ClientTimeout(total=4)
+            async with self.http_session.post(url, json=data, timeout=timeout) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    if result.get('ok'):
+                        self.last_message_time = time.time()
+                        self.sent_count += 1
+                        logger.info(
+                            f"Telegram send success (async) | http_ms={(self.last_message_time - send_start)*1000:.1f} | sent_total={self.sent_count}"
+                        )
+                        return True
+                    logger.error(f"Telegram API error: {result}")
+                    return False
+                text = await resp.text()
+                logger.error(
+                    f"HTTP error {resp.status}: {text} | http_ms={(time.time()-send_start)*1000:.1f}"
+                )
+                return False
+        except Exception as e:
+            logger.error(f"Error sending Telegram message (async): {e}")
+            return False
+
     def should_send_message(self, signal: Dict) -> bool:
         """Determine if message should be sent based on filters - ONLY HIGH IMPACT"""
         try:
