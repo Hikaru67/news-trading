@@ -39,6 +39,8 @@ class TelegramBot:
         self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.channel_id = os.getenv('TELEGRAM_CHANNEL_ID')
         self.input_mode = getenv('INPUT_MODE', 'kafka').lower()  # 'kafka' or 'http'
+        self.api_base = os.getenv('TELEGRAM_API_BASE', 'https://api.telegram.org')
+        self.fast_ack = os.getenv('TELEGRAM_FAST_ACK', 'true').lower() == 'true'
         
         if not self.bot_token or not self.channel_id:
             logger.warning("Telegram bot token or channel ID not configured")
@@ -243,7 +245,8 @@ class TelegramBot:
                 time.sleep(self.min_interval - (current_time - self.last_message_time))
             
             # Send message
-            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+            url = f"{self.api_base}/bot{self.bot_token}/sendMessage"
+            url = f"{self.api_base}/bot{self.bot_token}/sendMessage"
             data = {
                 'chat_id': self.channel_id,
                 'text': message,
@@ -432,37 +435,66 @@ class TelegramBot:
                 t_after_format = time.time()
 
                 # Send
-                t_send_start = time.time()
-                sent = False
-                if self.http_session is None:
-                    # initialize session lazily
-                    timeout = aiohttp.ClientTimeout(total=4)
-                    connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
-                    self.http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-                try:
-                    sent = await self.async_send_telegram_message(formatted_message)
-                except Exception as e:
-                    logger.error(f"async send failed, fallback to sync: {e}")
-                    sent = self.send_telegram_message(formatted_message)
-                t_after_send = time.time()
+                if self.fast_ack:
+                    # schedule send and acknowledge immediately
+                    if self.http_session is None:
+                        timeout = aiohttp.ClientTimeout(total=4)
+                        connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
+                        self.http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+                    async def _bg_send():
+                        try:
+                            sent_bg = await self.async_send_telegram_message(formatted_message)
+                            if sent_bg:
+                                signal_id = signal.get('event_id', '')
+                                self.mark_signal_sent(signal_id)
+                                MESSAGES_SENT.labels(
+                                    source=signal.get('source', 'unknown'),
+                                    event_type=signal.get('event_type', 'unknown')
+                                ).inc()
+                        except Exception as e:
+                            logger.error(f"background send failed: {e}")
+                    asyncio.create_task(_bg_send())
 
-                metrics = {
-                    "filter_ms": round((t_after_filter - t_filter_start) * 1000, 1),
-                    "format_ms": round((t_after_format - t_format_start) * 1000, 1),
-                    "send_ms": round((t_after_send - t_send_start) * 1000, 1),
-                    "end_to_end_ms": round((t_after_send - t_receive) * 1000, 1)
-                }
-                logger.info(f"HTTP Intake Latency | {metrics}")
+                    metrics = {
+                        "filter_ms": round((t_after_filter - t_filter_start) * 1000, 1),
+                        "format_ms": round((t_after_format - t_format_start) * 1000, 1),
+                        "queued": True,
+                        "end_to_end_ms": round((time.time() - t_receive) * 1000, 1)
+                    }
+                    logger.info(f"HTTP Intake Latency (fast_ack) | {metrics}")
+                    return web.json_response({"ok": True, "queued": True, "metrics": metrics})
+                else:
+                    t_send_start = time.time()
+                    sent = False
+                    if self.http_session is None:
+                        # initialize session lazily
+                        timeout = aiohttp.ClientTimeout(total=4)
+                        connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
+                        self.http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+                    try:
+                        sent = await self.async_send_telegram_message(formatted_message)
+                    except Exception as e:
+                        logger.error(f"async send failed, fallback to sync: {e}")
+                        sent = self.send_telegram_message(formatted_message)
+                    t_after_send = time.time()
 
-                if sent:
-                    signal_id = signal.get('event_id', '')
-                    self.mark_signal_sent(signal_id)
-                    MESSAGES_SENT.labels(
-                        source=signal.get('source', 'unknown'),
-                        event_type=signal.get('event_type', 'unknown')
-                    ).inc()
+                    metrics = {
+                        "filter_ms": round((t_after_filter - t_filter_start) * 1000, 1),
+                        "format_ms": round((t_after_format - t_format_start) * 1000, 1),
+                        "send_ms": round((t_after_send - t_send_start) * 1000, 1),
+                        "end_to_end_ms": round((t_after_send - t_receive) * 1000, 1)
+                    }
+                    logger.info(f"HTTP Intake Latency | {metrics}")
 
-                return web.json_response({"ok": True, "sent": bool(sent), "metrics": metrics})
+                    if sent:
+                        signal_id = signal.get('event_id', '')
+                        self.mark_signal_sent(signal_id)
+                        MESSAGES_SENT.labels(
+                            source=signal.get('source', 'unknown'),
+                            event_type=signal.get('event_type', 'unknown')
+                        ).inc()
+
+                    return web.json_response({"ok": True, "sent": bool(sent), "metrics": metrics})
 
             app.router.add_get('/health', handle_health)
             app.router.add_post('/signal', handle_signal)
