@@ -12,10 +12,17 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY services/signal-collector/ .
+COPY main.py .
 
 # Create logs directory
 RUN mkdir -p /app/logs
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+# Expose metrics port
+EXPOSE 8000
 
 # Run the application
 CMD ["python", "main.py"]

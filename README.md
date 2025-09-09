@@ -4,12 +4,13 @@ A real-time news-driven trading system that collects cryptocurrency news from RS
 
 ## 🚀 Features
 
-- **RSS Feed Collection**: Automatically collects news from Binance and Coinbase RSS feeds
-- **Signal Processing**: Detects listing/delisting events and normalizes them into trading signals
+- **BWEnews Integration**: Real-time news from BWEnews RSS feed and WebSocket API
+- **Signal Processing**: Detects listing/delisting/hack events and normalizes them into trading signals
 - **Kafka Integration**: Uses Apache Kafka for reliable message queuing
 - **PostgreSQL Database**: Stores trades, orders, and audit logs
 - **Redis Caching**: Handles deduplication and hot state management
-- **Simulated Trading**: Paper trading mode for safe testing
+- **AI/ML Processing**: BERT sentiment analysis and ML event classification
+- **Multi-Exchange Trading**: Bybit and MEXC exchange integration
 - **Monitoring**: Prometheus metrics and Grafana dashboards
 
 ## 📋 Prerequisites
@@ -52,7 +53,7 @@ docker-compose up -d
 docker-compose ps
 
 # View logs
-docker-compose logs -f signal-collector
+docker-compose logs -f bwenews-client
 docker-compose logs -f execution-engine
 ```
 
@@ -120,24 +121,15 @@ GROUP BY symbol;
 
 ## 🔧 Configuration
 
-### Signal Sources
+### BWEnews Configuration
 
-Edit `services/signal-collector/main.py` to add/modify RSS sources:
+The system uses BWEnews as the primary news source:
 
-```python
-self.sources = {
-    'binance': {
-        'url': 'https://www.binance.com/en/support/announcement/rss',
-        'trust_score': 0.98,
-        'check_interval': 30
-    },
-    'coinbase': {
-        'url': 'https://blog.coinbase.com/feed',
-        'trust_score': 0.95,
-        'check_interval': 60
-    }
-}
-```
+- **RSS Feed**: https://rss-public.bwe-ws.com/
+- **WebSocket API**: wss://bwenews-api.bwe-ws.com/ws
+- **Documentation**: https://telegra.ph/BWEnews-API-documentation-06-19
+
+The BWEnews client automatically handles both RSS polling and WebSocket real-time updates.
 
 ### Trading Strategies
 
@@ -159,10 +151,10 @@ self.playbooks = {
 
 ### Manual Testing
 
-1. **Test Signal Collection**:
+1. **Test BWEnews Collection**:
    ```bash
-   # Check if signals are being collected
-   docker-compose logs signal-collector | grep "Processed signal"
+   # Check if signals are being collected from BWEnews
+   docker-compose logs bwenews-client | grep "Processed"
    ```
 
 2. **Test Signal Processing**:

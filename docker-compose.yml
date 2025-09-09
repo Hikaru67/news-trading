@@ -65,24 +65,22 @@ services:
       timeout: 5s
       retries: 5
 
-  # Signal Collector Service
-  signal-collector:
+  # BWEnews Client Service - Unified RSS and WebSocket client
+  bwenews-client:
     build:
       context: .
-      dockerfile: services/signal-collector/Dockerfile
+      dockerfile: services/bwenews-client/Dockerfile
     depends_on:
-      postgres:
-        condition: service_healthy
       kafka:
         condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      - DATABASE_URL=postgresql://trading_user:trading_pass@postgres:5432/news_trading
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - REDIS_URL=redis://redis:6379
     volumes:
       - ./logs:/app/logs
+    restart: unless-stopped
 
   # Execution Engine Service (Go)
   execution-engine:
@@ -120,11 +118,11 @@ services:
     volumes:
       - ./logs:/root/logs
 
-  # Phase 2: Real-time Infrastructure
-  websocket-rss-client:
+  # BWEnews Trading Services
+  bwenews-trader:
     build:
       context: .
-      dockerfile: services/websocket-rss-client/Dockerfile
+      dockerfile: services/bwenews-trader/Dockerfile
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - REDIS_URL=redis://redis:6379
@@ -133,27 +131,10 @@ services:
       - redis
     restart: unless-stopped
 
-  real-time-x-client:
+  bwenews-mexc-trader:
     build:
       context: .
-      dockerfile: services/real-time-x-client/Dockerfile
-    environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - REDIS_URL=redis://redis:6379
-      - X_BEARER_TOKEN=${X_BEARER_TOKEN}
-      - X_API_KEY=${X_API_KEY}
-      - X_API_SECRET=${X_API_SECRET}
-      - X_ACCESS_TOKEN=${X_ACCESS_TOKEN}
-      - X_ACCESS_TOKEN_SECRET=${X_ACCESS_TOKEN_SECRET}
-    depends_on:
-      - kafka
-      - redis
-    restart: unless-stopped
-
-  fed-calendar-client:
-    build:
-      context: .
-      dockerfile: services/fed-calendar-client/Dockerfile
+      dockerfile: services/bwenews-mexc-trader/Dockerfile
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - REDIS_URL=redis://redis:6379
