@@ -10,6 +10,7 @@ import logging
 import os
 import time
 import aiohttp
+from aiohttp import web
 import redis
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -223,6 +224,17 @@ class ExchangeChecker:
     def check_token_listings(self, token_symbol: str) -> Dict[str, Dict]:
         """Check where token is listed across exchanges"""
         listings = {}
+        token_upper = (token_symbol or '').upper()
+        # Generate alias candidates for matching across exchanges
+        alias_candidates = [
+            token_upper,
+            f"{token_upper}USDT",
+            f"{token_upper}_USDT",
+            f"{token_upper}USD",
+            f"{token_upper}_USD",
+            f"{token_upper}USDC",
+            f"{token_upper}_USDC",
+        ]
         
         for exchange_key, exchange in self.exchanges.items():
             listings[exchange_key] = {
@@ -234,17 +246,138 @@ class ExchangeChecker:
             
             # Check spot listings
             for pair in exchange['trading_pairs']:
-                if token_symbol in pair.upper():
+                up = pair.upper()
+                if any(alias == up or alias in up for alias in alias_candidates):
                     listings[exchange_key]['spot'] = True
                     listings[exchange_key]['spot_pairs'].append(pair)
             
             # Check perp listings
             for contract in exchange['perp_contracts']:
-                if token_symbol in contract.upper():
+                up = contract.upper()
+                if any(alias == up or alias in up for alias in alias_candidates):
                     listings[exchange_key]['perp'] = True
                     listings[exchange_key]['perp_contracts'].append(contract)
         
         return listings
+
+    def choose_best_cex(self, token_symbol: str) -> Optional[Dict]:
+        """Choose best CEX and market (prefer perp over spot) with priority: mexc, bybit, gate"""
+        listings = self.check_token_listings(token_symbol)
+        priority = ['mexc', 'bybit', 'gate']
+        for ex in priority:
+            info = listings.get(ex, {})
+            # Prefer perp
+            if info.get('perp') and info.get('perp_contracts'):
+                return {
+                    'exchange': ex,
+                    'market': 'perp',
+                    'symbols': info.get('perp_contracts', [])
+                }
+            if info.get('spot') and info.get('spot_pairs'):
+                return {
+                    'exchange': ex,
+                    'market': 'spot',
+                    'symbols': info.get('spot_pairs', [])
+                }
+        return None
+
+    async def fetch_price(self, session: aiohttp.ClientSession, exchange_key: str, market: str, token_symbol: str, symbols: List[str]) -> Optional[float]:
+        """Fetch approximate price in USDT for the chosen market/symbol."""
+        try:
+            # Try to construct a USDT pair/contract
+            # Pick first symbol that contains USDT
+            usdt_symbol = None
+            for s in symbols:
+                if 'USDT' in s.upper():
+                    usdt_symbol = s
+                    break
+            # Fallback to token + USDT
+            if not usdt_symbol:
+                usdt_symbol = f"{token_symbol.upper()}USDT"
+
+            if exchange_key == 'mexc':
+                common_headers = {
+                    'User-Agent': 'news-trading-bot/1.0',
+                    'Accept': 'application/json'
+                }
+                if market == 'spot':
+                    url = f"https://api.mexc.com/api/v3/ticker/price?symbol={usdt_symbol}"
+                    logger.info(f"[price] MEXC spot symbol={usdt_symbol} url=curl -s '{url}'")
+                    async with session.get(url, headers=common_headers, timeout=5) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return float(data.get('price'))
+                        else:
+                            try:
+                                text = await resp.text()
+                            except Exception:
+                                text = '<no-body>'
+                            logger.error(f"[price] MEXC spot HTTP {resp.status} body={text[:200]}")
+                else:
+                    # Perp price endpoint
+                    # MEXC perp requires underscore: e.g., KTA_USDT
+                    mexc_perp_symbol = usdt_symbol if '_' in usdt_symbol else usdt_symbol.replace('USDT', '_USDT')
+                    url = f"https://contract.mexc.com/api/v1/contract/ticker?symbol={mexc_perp_symbol}"
+                    logger.info(f"[price] MEXC perp symbol={mexc_perp_symbol} url=curl -s '{url}'")
+                    async with session.get(url, headers=common_headers, timeout=5) as resp:
+                        if resp.status == 200:
+                            try:
+                                data = await resp.json()
+                            except Exception as je:
+                                text = await resp.text()
+                                logger.error(f"[price] MEXC perp JSON parse error: {je} body={text[:200]}")
+                                return None
+                            arr = data.get('data', [])
+                            if isinstance(arr, dict):
+                                # Some APIs return object instead of list
+                                last_price = arr.get('lastPrice') or arr.get('last')
+                                if last_price is not None:
+                                    return float(last_price)
+                            if isinstance(arr, list) and arr:
+                                last_price = arr[0].get('lastPrice') or arr[0].get('last')
+                                if last_price is not None:
+                                    return float(last_price)
+                        else:
+                            try:
+                                text = await resp.text()
+                            except Exception:
+                                text = '<no-body>'
+                            logger.error(f"[price] MEXC perp HTTP {resp.status} body={text[:200]}")
+            elif exchange_key == 'bybit':
+                if market == 'spot':
+                    url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={usdt_symbol}"
+                else:
+                    url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={usdt_symbol}"
+                logger.info(f"[price] Bybit {market} symbol={usdt_symbol} url=curl -s '{url}'")
+                async with session.get(url, timeout=3) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        lst = data.get('result', {}).get('list', [])
+                        if lst:
+                            return float(lst[0].get('lastPrice'))
+            elif exchange_key == 'gate':
+                if market == 'spot':
+                    # Gate spot uses pair like KTA_USDT
+                    pair = usdt_symbol.replace('USDT', '_USDT')
+                    url = f"https://api.gateio.ws/api/v4/spot/tickers?currency_pair={pair}"
+                    logger.info(f"[price] Gate spot symbol={pair} url=curl -s '{url}'")
+                    async with session.get(url, timeout=3) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if isinstance(data, list) and data:
+                                return float(data[0].get('last'))
+                else:
+                    url = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
+                    logger.info(f"[price] Gate perp list url=curl -s '{url}' (filter symbol={usdt_symbol})")
+                    async with session.get(url, timeout=3) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            for item in data:
+                                if item.get('contract') == usdt_symbol:
+                                    return float(item.get('last'))
+        except Exception as e:
+            logger.error(f"Price fetch error: {e}")
+        return None
 
     def create_trade_signal(self, signal: Dict, listings: Dict[str, Dict]) -> Optional[Dict]:
         """Create trade signal based on listings found"""
@@ -369,7 +502,7 @@ class ExchangeChecker:
             logger.error(f"Error processing signal: {e}")
 
     async def run(self):
-        """Main run loop"""
+        """Main run loop supporting Kafka and HTTP intake"""
         logger.info("Starting Exchange Checker Service")
         
         # Start Prometheus metrics server
@@ -379,21 +512,126 @@ class ExchangeChecker:
         logger.info("Fetching initial exchange data...")
         for exchange_key in self.exchanges.keys():
             await self.fetch_exchange_data(exchange_key)
-        
-        # Process signals
-        logger.info("Starting signal processing...")
-        try:
-            for message in self.consumer:
+
+        mode = os.getenv('INPUT_MODE', 'kafka').lower()
+        if mode == 'http':
+            app = web.Application()
+
+            async def handle_health(request):
+                return web.json_response({"status": "ok"})
+
+            async def handle_signal(request):
                 try:
-                    signal = message.value
-                    await self.process_signal(signal)
+                    signal = await request.json()
+                except Exception:
+                    return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
+
+                # Process signal (Kafka path, metrics, etc.)
+                await self.process_signal(signal)
+
+                # Compute best CEX + price and attach to signal.extras.best_cex
+                token = self.extract_token_symbol(signal) or ''
+                best = None
+                price_val = None
+                try:
+                    best = self.choose_best_cex(token) if token else None
+                    if best:
+                        async with aiohttp.ClientSession() as session2:
+                            price_val = await self.fetch_price(session2, best['exchange'], best['market'], token, best.get('symbols', []))
+                            # If current best is not MEXC, probe MEXC perp to prefer it when available
+                            if best.get('exchange') != 'mexc':
+                                try:
+                                    mexc_price = await self.fetch_price(session2, 'mexc', 'perp', token, [f"{token.upper()}_USDT"])
+                                    if mexc_price is not None:
+                                        logger.info(f"[best_cex] Overriding to MEXC perp due to availability, token={token}")
+                                        best = {
+                                            'exchange': 'mexc',
+                                            'market': 'perp',
+                                            'symbols': [f"{token.upper()}_USDT"],
+                                        }
+                                        price_val = mexc_price
+                                except Exception as mexc_probe_e:
+                                    logger.error(f"MEXC priority probe error: {mexc_probe_e}")
+                    # Fallback: if no best or no price, probe MEXC perp directly with TOKEN_USDT underscore format
+                    if (not best or price_val is None) and token:
+                        try:
+                            async with aiohttp.ClientSession() as session_fallback:
+                                fb_price = await self.fetch_price(session_fallback, 'mexc', 'perp', token, [f"{token.upper()}_USDT"])
+                                if fb_price is not None:
+                                    best = {
+                                        'exchange': 'mexc',
+                                        'market': 'perp',
+                                        'symbols': [f"{token.upper()}_USDT"],
+                                    }
+                                    price_val = fb_price
+                        except Exception as fb_e:
+                            logger.error(f"MEXC fallback error: {fb_e}")
                 except Exception as e:
-                    logger.error(f"Error processing message: {e}")
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"Error in signal processing loop: {e}")
-            raise
+                    logger.error(f"best_cex computation error: {e}")
+
+                extras = signal.get('extras') or {}
+                if best:
+                    best_payload = {
+                        'exchange': best['exchange'],
+                        'market': best['market'],
+                        'symbols': best.get('symbols', []),
+                        'price': price_val
+                    }
+                    extras['best_cex'] = best_payload
+                signal['extras'] = extras
+
+                # Optionally forward to Telegram directly
+                tele_forwarded = False
+                tele_url = os.getenv('TELEGRAM_HTTP_URL')
+                if tele_url:
+                    try:
+                        async with aiohttp.ClientSession() as session3:
+                            async with session3.post(tele_url, json=signal, timeout=10) as resp:
+                                tele_forwarded = resp.status == 200
+                    except Exception as e:
+                        logger.error(f"Error forwarding to telegram: {e}")
+
+                # Optionally forward to trade-executor directly
+                trade_forwarded = False
+                trade_url = os.getenv('TRADE_EXECUTOR_HTTP_URL')
+                if trade_url:
+                    trade_signal = self.create_trade_signal(signal, self.check_token_listings(token) if token else {})
+                    if trade_signal:
+                        try:
+                            async with aiohttp.ClientSession() as session4:
+                                async with session4.post(trade_url, json=trade_signal, timeout=10) as resp:
+                                    trade_forwarded = resp.status == 200
+                        except Exception as e:
+                            logger.error(f"Error forwarding to trade executor: {e}")
+
+                return web.json_response({"ok": True, "tele_forwarded": tele_forwarded, "trade_forwarded": trade_forwarded, "best_cex": extras.get('best_cex')})
+
+            app.router.add_get('/health', handle_health)
+            app.router.add_post('/signal', handle_signal)
+
+            port = int(os.getenv('EXCHANGE_CHECKER_HTTP_PORT', '8014'))
+            logger.info(f"HTTP intake listening on 0.0.0.0:{port}")
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '0.0.0.0', port)
+            await site.start()
+            while True:
+                await asyncio.sleep(3600)
+        else:
+            # Process signals from Kafka
+            logger.info("Starting signal processing (Kafka)...")
+            try:
+                for message in self.consumer:
+                    try:
+                        signal = message.value
+                        await self.process_signal(signal)
+                    except Exception as e:
+                        logger.error(f"Error processing message: {e}")
+                        continue
+                        
+            except Exception as e:
+                logger.error(f"Error in signal processing loop: {e}")
+                raise
 
 def main():
     """Main entry point"""

@@ -46,6 +46,10 @@ class BWEnewsClient:
         self.rss_url = 'https://rss-public.bwe-ws.com/'
         self.websocket_url = 'wss://bwenews-api.bwe-ws.com/ws'
         self.trust_score = 0.90
+        # Direct HTTP fanout (bypass Kafka) configuration
+        self.direct_enabled = os.getenv('DIRECT_FANOUT_ENABLED', 'false').lower() in ('1','true','yes')
+        self.direct_telegram_url = os.getenv('TELEGRAM_HTTP_URL')  # e.g., http://telegram-bot:8013/signal
+        self.direct_exchange_url = os.getenv('EXCHANGE_CHECKER_HTTP_URL')  # e.g., http://exchange-checker:8014/signal
         
         # Event patterns for classification - ONLY specific token events
         self.event_patterns = {
@@ -170,10 +174,10 @@ class BWEnewsClient:
             if not self.is_duplicate(signal['event_id']):
                 # Mark as processed
                 self.mark_as_processed(signal['event_id'])
-                
-                # Publish to Kafka
-                await self.publish_to_kafka(signal)
-                
+
+                # Fanout: Direct HTTP (low-latency) and/or Kafka (optional)
+                await self.fanout(signal)
+
                 logger.info(f"Processed BWEnews WebSocket message: {signal['event_type']}")
             
         except Exception as e:
@@ -244,9 +248,9 @@ class BWEnewsClient:
             
             # Mark as processed
             self.mark_as_processed(content_hash)
-            
-            # Publish to Kafka
-            await self.publish_to_kafka(signal)
+
+            # Fanout: Direct HTTP (low-latency) and/or Kafka (optional)
+            await self.fanout(signal)
             
             logger.info(f"Processed BWEnews RSS entry: {event_type}")
             
@@ -347,6 +351,36 @@ class BWEnewsClient:
             logger.info(f"Published BWEnews signal to Kafka: {signal['event_id']}")
         except Exception as e:
             logger.error(f"Error publishing to Kafka: {e}")
+
+    async def fanout(self, signal: Dict):
+        """Send signal via configured outputs with minimal latency"""
+        # Direct HTTP fanout first (if enabled and URLs provided)
+        if self.direct_enabled:
+            async with aiohttp.ClientSession() as session:
+                # Send to Telegram HTTP intake
+                if self.direct_telegram_url:
+                    try:
+                        async with session.post(self.direct_telegram_url, json=signal, timeout=5) as resp:
+                            if resp.status == 200:
+                                logger.info(f"Direct HTTP -> Telegram OK: {signal['event_id']}")
+                            else:
+                                logger.warning(f"Direct HTTP -> Telegram failed: {resp.status}")
+                    except Exception as e:
+                        logger.error(f"Direct HTTP -> Telegram error: {e}")
+                # Send to Exchange Checker HTTP intake
+                if self.direct_exchange_url:
+                    try:
+                        async with session.post(self.direct_exchange_url, json=signal, timeout=5) as resp:
+                            if resp.status == 200:
+                                logger.info(f"Direct HTTP -> ExchangeChecker OK: {signal['event_id']}")
+                            else:
+                                logger.warning(f"Direct HTTP -> ExchangeChecker failed: {resp.status}")
+                    except Exception as e:
+                        logger.error(f"Direct HTTP -> ExchangeChecker error: {e}")
+
+        # Also publish to Kafka unless explicitly disabled
+        if os.getenv('DISABLE_KAFKA_PUBLISH', 'false').lower() not in ('1','true','yes'):
+            await self.publish_to_kafka(signal)
     
     async def start(self):
         """Start BWEnews client"""
