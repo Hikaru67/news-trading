@@ -145,18 +145,7 @@ services:
       - redis
     restart: unless-stopped
 
-  # Phase 2: AI/ML Integration
-  ai-ml-service:
-    build:
-      context: .
-      dockerfile: services/ai-ml-service/Dockerfile
-    environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - kafka
-      - redis
-    restart: unless-stopped
+  
 
   # Phase 2: Advanced Trading Features
   advanced-trading-service:
