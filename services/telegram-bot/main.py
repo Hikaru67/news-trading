@@ -90,6 +90,8 @@ class TelegramBot:
         
         # Shared HTTP session for async sends (HTTP mode)
         self.http_session = None
+        # Runtime counters
+        self.sent_count = 0
 
     def is_signal_sent(self, signal_id: str) -> bool:
         """Check if signal was already sent to Telegram"""
@@ -261,8 +263,9 @@ class TelegramBot:
                     result = response.json()
                     if result.get('ok'):
                         self.last_message_time = time.time()
+                        self.sent_count += 1
                         logger.info(
-                            f"Telegram send success | http_ms={(self.last_message_time - send_start)*1000:.1f}"
+                            f"Telegram send success | http_ms={(self.last_message_time - send_start)*1000:.1f} | sent_total={self.sent_count}"
                         )
                         return True
                     else:
@@ -462,7 +465,7 @@ class TelegramBot:
                         "end_to_end_ms": round((time.time() - t_receive) * 1000, 1)
                     }
                     logger.info(f"HTTP Intake Latency (fast_ack) | {metrics}")
-                    return web.json_response({"ok": True, "queued": True, "metrics": metrics})
+                    return web.json_response({"ok": True, "queued": True, "metrics": metrics, "sent_total": self.sent_count})
                 else:
                     t_send_start = time.time()
                     sent = False
@@ -494,7 +497,7 @@ class TelegramBot:
                             event_type=signal.get('event_type', 'unknown')
                         ).inc()
 
-                    return web.json_response({"ok": True, "sent": bool(sent), "metrics": metrics})
+                    return web.json_response({"ok": True, "sent": bool(sent), "metrics": metrics, "sent_total": self.sent_count})
 
             app.router.add_get('/health', handle_health)
             app.router.add_post('/signal', handle_signal)
