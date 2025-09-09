@@ -57,19 +57,13 @@ class TelegramBot:
         # Message templates - ONLY TOKEN-SPECIFIC EVENTS
         self.message_templates = {
             'LISTING': {
-                'emoji': '🚀',
-                'title': 'Listing',
-                'color': '🟢'
+                'title': 'Listing'
             },
             'DELIST': {
-                'emoji': '⚠️',
-                'title': 'Delist',
-                'color': '🔴'
+                'title': 'Delist'
             },
             'HACK': {
-                'emoji': '💥',
-                'title': 'Hack',
-                'color': '🔴'
+                'title': 'Hack'
             }
         }
         
@@ -89,7 +83,7 @@ class TelegramBot:
         self.redis_client.setex(f"telegram_sent:{signal_id}", self.sent_signals_ttl, "1")
 
     def format_message(self, signal: Dict) -> str:
-        """Format signal into compact Telegram message"""
+        """Format signal into BWEnews-style Telegram message"""
         try:
             event_type = signal.get('event_type', 'OTHER')
             template = self.message_templates.get(event_type)
@@ -111,25 +105,42 @@ class TelegramBot:
                 vietnam_tz = timezone(timedelta(hours=7))
                 formatted_time = datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S')
             
-            # Get primary entity and source
-            primary_entity = signal.get('primary_entity', '')
-            source = signal.get('source', 'N/A')
+            # Get signal data
             headline = signal.get('headline', 'N/A')
             url = signal.get('url', 'N/A')
+            primary_entity = signal.get('primary_entity', '')
+            entities = signal.get('entities', [])
             
-            # Format source name for display
-            source_display = source.upper() if source else 'UNKNOWN'
+            # Clean headline for Telegram (remove HTML entities and escape special characters)
+            import html
+            import re
+            clean_headline = html.unescape(headline)
+            # Escape special HTML characters for Telegram
+            clean_headline = clean_headline.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             
-            # Build compact message
-            message = f"""*{source_display} {template['title']}:* {headline}
+            # Extract market cap if available in headline
+            market_cap = "N/A"
+            if "$" in clean_headline and "MarketCap" in clean_headline:
+                try:
+                    # Try to extract market cap from headline
+                    match = re.search(r'\$(\d+[KMB]?)', clean_headline)
+                    if match:
+                        market_cap = f"${match.group(1)}"
+                except:
+                    pass
+            
+            # Build BWEnews-style message (simplified format)
+            message = f"""📰 Headline:
+{clean_headline}
 
-*{source_display}上新:* {headline}
-
-*${primary_entity}* MarketCap: $N/A
+${primary_entity}  MarketCap: {market_cap}
 (Auto match could be wrong, 自动匹配可能不准确)
 ————————————
 {formatted_time}
 source: {url}"""
+            
+            # Debug logging
+            logger.info(f"Formatted message: {repr(message)}")
             
             return message.strip()
             
@@ -154,7 +165,6 @@ source: {url}"""
             data = {
                 'chat_id': self.channel_id,
                 'text': message,
-                'parse_mode': 'Markdown',
                 'disable_web_page_preview': True
             }
             
