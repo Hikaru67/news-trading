@@ -85,70 +85,19 @@ services:
     restart: unless-stopped
 
   # Execution Engine Service (Go)
-  execution-engine:
-    build:
-      context: .
-      dockerfile: services/execution-engine-go/Dockerfile
-    depends_on:
-      postgres:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      - DATABASE_URL=postgresql://trading_user:trading_pass@postgres:5432/news_trading
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - REDIS_URL=redis://redis:6379
+  # (removed execution-engine; not used in direct HTTP flow)
 
   # Bybit API Client Service (Go)
-  bybit-api-client:
-    build:
-      context: .
-      dockerfile: services/bybit-api-client/Dockerfile
-    environment:
-      - BYBIT_API_KEY=${BYBIT_API_KEY}
-      - BYBIT_SECRET_KEY=${BYBIT_SECRET_KEY}
-      - BYBIT_TESTNET=${BYBIT_TESTNET:-true}
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - kafka
-      - redis
-    profiles:
-      - tools
-    volumes:
-      - ./logs:/root/logs
+  # (removed bybit-api-client; tools-only)
 
   # BWEnews Trading Services
   # (removed legacy bwenews-trader and bwenews-mexc-trader)
 
   
 
-  # Phase 2: Advanced Trading Features
-  advanced-trading-service:
-    build:
-      context: .
-      dockerfile: services/advanced-trading-service/Dockerfile
-    environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - kafka
-      - redis
-    restart: unless-stopped
+  # (removed advanced-trading-service)
 
-  backtesting-service:
-    build:
-      context: .
-      dockerfile: services/backtesting-service/Dockerfile
-    environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - kafka
-      - redis
-    restart: unless-stopped
+  # (removed backtesting-service)
 
   # X (Twitter) Crawler Service - DISABLED (using mock data)
   # x-crawler:
@@ -275,18 +224,7 @@ services:
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
       - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
 
-  # Kafka UI Dashboard
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    ports:
-      - "8080:8080"
-    environment:
-      KAFKA_CLUSTERS_0_NAME: local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
-      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
-    depends_on:
-      - kafka
-      - zookeeper
+  # (removed kafka-ui)
 
 volumes:
   postgres_data:
